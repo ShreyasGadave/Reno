@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { FileText, Calendar, Clock, Star, Archive, Trash2, RotateCcw, AlertTriangle, Search } from "lucide-react";
 import { createDocument, getAllDocument, updateDocument, deleteDocument } from "@/services/document.service";
+import { localDB } from "@/lib/indexeddb";
 import {
   Card,
   CardContent,
@@ -45,6 +46,44 @@ export default function AllDocuments({ filter = "all" }: { filter?: string }) {
   const router = useRouter();
 
   const handleCreate = async () => {
+    if (typeof window !== "undefined" && !navigator.onLine) {
+      try {
+        const tempId = `temp_${Date.now()}`;
+        const tempDoc = {
+          id: tempId,
+          title: "Untitled Document",
+          description: "",
+          content: { blocks: [] },
+          visibility: "PRIVATE" as const,
+          status: "ACTIVE" as const,
+          isFavorite: false,
+          isArchived: false,
+          isDeleted: false,
+          version: 1,
+          ownerId: "offline_user",
+          updatedAt: new Date().toISOString(),
+          localChangesCount: 1,
+        };
+        await localDB.saveDocument(tempDoc);
+
+        // Queue creation sync op
+        await localDB.enqueueSyncOp({
+          id: `create_${Date.now()}`,
+          documentId: tempId,
+          action: "CREATE",
+          payload: tempDoc,
+          timestamp: Date.now(),
+        });
+
+        toast.info("Created document offline");
+        router.push(`/document/${tempId}`);
+      } catch (err) {
+        console.error(err);
+        toast.error("Failed to create document offline");
+      }
+      return;
+    }
+
     try {
       const document = await createDocument();
       toast.success("Document created");

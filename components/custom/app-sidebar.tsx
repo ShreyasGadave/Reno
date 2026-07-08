@@ -63,19 +63,27 @@ const menuItems = [
   },
 ];
 export function AppSidebar() {
-  const pathname = usePathname();
+  const pathname = usePathname() || "";
   const router = useRouter();
   const [user, setUser] = useState<{ name?: string; email: string } | null>(null);
 
   useEffect(() => {
-    fetch("/api/auth/me")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success) {
-          setUser(data.user);
-        }
-      })
-      .catch((err) => console.error("Error fetching me:", err));
+    const fetchUser = () => {
+      fetch("/api/auth/me")
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success) {
+            setUser(data.user);
+          }
+        })
+        .catch((err) => console.error("Error fetching me:", err));
+    };
+
+    fetchUser();
+
+    // Refresh cookie token every 10 minutes to keep sliding session active smoothly
+    const interval = setInterval(fetchUser, 10 * 60 * 1000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleLogout = async () => {

@@ -15,24 +15,47 @@ export function proxy(request: NextRequest) {
     "/archive",
   ];
 
+  const isAuthPage = authPages.includes(pathname);
+  const isProtectedPage = protectedPages.some((page) => pathname.startsWith(page));
+
   if (token) {
     try {
-      jwt.verify(token, process.env.JWT_SECRET!);
+      const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string; email: string; name?: string };
 
-      // Already logged in → don't allow auth pages
-      if (authPages.includes(pathname)) {
+      // Already logged in → redirect auth pages to dashboard
+      if (isAuthPage) {
         return NextResponse.redirect(new URL("/dashboard", request.url));
       }
 
-      return NextResponse.next();
+      // Extend token expiry (sliding session refresh)
+      const newToken = jwt.sign(
+        { id: decoded.id, email: decoded.email, name: decoded.name },
+        process.env.JWT_SECRET!,
+        { expiresIn: "15m" }
+      );
+
+      const response = NextResponse.next();
+      response.cookies.set({
+        name: "token",
+        value: newToken,
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+        maxAge: 15 * 60, // 15 minutes fresh duration
+      });
+
+      return response;
     } catch {
-      // Invalid or expired token → fall through to unauthenticated handling below
+      // Invalid or expired token → fall through to clean and redirect
     }
   }
 
-  // Not logged in → protect private pages
-  if (protectedPages.some((page) => pathname.startsWith(page))) {
-    return NextResponse.redirect(new URL("/signin", request.url));
+  // Not logged in → redirect protected pages to signin page
+  if (isProtectedPage) {
+    const response = NextResponse.redirect(new URL("/signin", request.url));
+    response.cookies.delete("token");
+    return response;
   }
 
   return NextResponse.next();

@@ -3,8 +3,10 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { useSync, SyncState } from "@/hooks/useSync";
 import { localDB, LocalDocument, LocalVersion } from "@/lib/indexeddb";
+import { useSocket } from "@/hooks/useSocket";
+import { useOfflineSync } from "@/hooks/useOfflineSync";
+import { ConflictDialog } from "@/components/custom/conflict-dialog";
 import {
   FileText,
   Users,
@@ -67,20 +69,41 @@ interface Block {
 export default function DocumentEditorPage() {
   const router = useRouter();
   const params = useParams();
-  const documentId = params.id as string;
+  const documentId = (params?.id as string) || "";
 
+  // States
+  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; email: string } | null>(null);
+
+  // Socket Hook
+  const {
+    socketConnected,
+    collaborators,
+    sendCursor,
+    sendTyping,
+    socket,
+  } = useSocket(documentId, currentUser?.name || currentUser?.email || "User");
+
+  // Conflict state management
+  const [conflictOpen, setConflictOpen] = useState(false);
+  const [conflictData, setConflictData] = useState<any>(null);
+
+  const handleConflictDetected = useCallback((data: any) => {
+    setConflictData(data);
+    setConflictOpen(true);
+  }, []);
+
+  // Offline Sync Hook
   const {
     isOnline,
     syncState,
     localDoc,
     pendingChanges,
-    updateDocumentLocally,
+    updateDocument,
+    resolveConflictChoice,
     loadLocalDoc,
-    syncNow
-  } = useSync(documentId);
+    syncNow,
+  } = useOfflineSync(documentId, socket, socketConnected, handleConflictDetected);
 
-  // States
-  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; email: string } | null>(null);
   const [role, setRole] = useState<"OWNER" | "EDITOR" | "VIEWER">("VIEWER");
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [activeSidebar, setActiveSidebar] = useState<"none" | "history" | "ai" | "share">("none");
@@ -88,7 +111,7 @@ export default function DocumentEditorPage() {
 
   // Sharing states
   const [visibility, setVisibility] = useState<"PRIVATE" | "SHARED" | "PUBLIC">("PRIVATE");
-  const [collaborators, setCollaborators] = useState<any[]>([]);
+  const [invitedCollaborators, setInvitedCollaborators] = useState<any[]>([]);
   const [newCollabEmail, setNewCollabEmail] = useState("");
   const [newCollabRole, setNewCollabRole] = useState<"EDITOR" | "VIEWER">("EDITOR");
   const [isShareOpen, setIsShareOpen] = useState(false);
@@ -194,12 +217,14 @@ export default function DocumentEditorPage() {
     setBlocks(newBlocks);
     if (isReadOnly) return;
 
-    await updateDocumentLocally({
+    await updateDocument({
       content: { blocks: newBlocks },
     });
   };
 
   // --- Block Edit Functions ---
+
+  const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleBlockChange = (id: string, text: string) => {
     const updated = blocks.map((b) =>
@@ -213,6 +238,15 @@ export default function DocumentEditorPage() {
         : b
     );
     saveBlocks(updated);
+
+    // Send typing presence
+    sendTyping(true);
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+    }
+    typingTimerRef.current = setTimeout(() => {
+      sendTyping(false);
+    }, 1500);
   };
 
   const handleCheckboxChange = (id: string, checked: boolean) => {
@@ -283,7 +317,7 @@ export default function DocumentEditorPage() {
 
   const handleMetadataChange = async (updates: { title?: string; description?: string }) => {
     if (isReadOnly) return;
-    await updateDocumentLocally(updates);
+    await updateDocument(updates);
   };
 
   // --- Collaborator / Sharing Panel Operations ---
@@ -293,7 +327,7 @@ export default function DocumentEditorPage() {
       const res = await fetch(`/api/document/${documentId}/collaborators`);
       if (res.ok) {
         const data = await res.json();
-        setCollaborators(data.collaborators || []);
+        setInvitedCollaborators(data.collaborators || []);
       }
     } catch (e) {
       console.error(e);
@@ -345,7 +379,7 @@ export default function DocumentEditorPage() {
   const handleVisibilityChange = async (newVisibility: "PRIVATE" | "SHARED" | "PUBLIC") => {
     if (isReadOnly) return;
     try {
-      await updateDocumentLocally({ visibility: newVisibility });
+      await updateDocument({ visibility: newVisibility });
       setVisibility(newVisibility);
       toast.success(`Document visibility updated to ${newVisibility}`);
     } catch {
@@ -643,8 +677,30 @@ export default function DocumentEditorPage() {
             </Button>
           )}
 
+          {/* Active Collaborators list */}
+          {collaborators.length > 0 && (
+            <div className="flex items-center gap-1.5 border-l pl-3 mr-1">
+              {collaborators.map((c) => (
+                <div
+                  key={c.socketId}
+                  className="w-7 h-7 rounded-full flex items-center justify-center font-bold text-[10px] text-white border border-background relative uppercase select-none shadow-sm shrink-0"
+                  style={{ backgroundColor: getCollaboratorColor(c.userId) }}
+                  title={`${c.name} (${c.role})${c.typing ? " - Typing..." : ""}`}
+                >
+                  {c.name[0]}
+                  {c.typing && (
+                    <span className="absolute -bottom-0.5 -right-0.5 flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Role badge */}
-          <Badge variant="outline" className="h-7 border-muted-foreground/30 capitalize">
+          <Badge variant="outline" className="h-7 border-muted-foreground/30 capitalize shrink-0">
             {role.toLowerCase()}
           </Badge>
 
@@ -749,6 +805,8 @@ export default function DocumentEditorPage() {
                     <input
                       type="text"
                       value={block.text}
+                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onBlur={() => sendCursor(null)}
                       onChange={(e) => handleBlockChange(block.id, e.target.value)}
                       disabled={isReadOnly}
                       className="text-2xl font-bold border-0 focus:outline-none w-full bg-transparent text-foreground placeholder-muted-foreground/50"
@@ -760,6 +818,8 @@ export default function DocumentEditorPage() {
                     <input
                       type="text"
                       value={block.text}
+                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onBlur={() => sendCursor(null)}
                       onChange={(e) => handleBlockChange(block.id, e.target.value)}
                       disabled={isReadOnly}
                       className="text-xl font-semibold border-0 focus:outline-none w-full bg-transparent text-foreground placeholder-muted-foreground/50"
@@ -770,6 +830,8 @@ export default function DocumentEditorPage() {
                   {block.type === "paragraph" && (
                     <Textarea
                       value={block.text}
+                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onBlur={() => sendCursor(null)}
                       onChange={(e) => handleBlockChange(block.id, e.target.value)}
                       disabled={isReadOnly}
                       rows={1}
@@ -790,6 +852,8 @@ export default function DocumentEditorPage() {
                       <input
                         type="text"
                         value={block.text}
+                        onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                        onBlur={() => sendCursor(null)}
                         onChange={(e) => handleBlockChange(block.id, e.target.value)}
                         disabled={isReadOnly}
                         className={`text-sm border-0 focus:outline-none w-full bg-transparent text-foreground placeholder-muted-foreground/50 ${
@@ -803,6 +867,8 @@ export default function DocumentEditorPage() {
                   {block.type === "code" && (
                     <textarea
                       value={block.text}
+                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onBlur={() => sendCursor(null)}
                       onChange={(e) => handleBlockChange(block.id, e.target.value)}
                       disabled={isReadOnly}
                       className="font-mono text-xs w-full p-3 bg-muted/60 border border-muted/50 rounded-lg text-foreground focus:outline-none focus:ring-1 focus:ring-primary h-24 resize-none leading-relaxed"
@@ -810,6 +876,33 @@ export default function DocumentEditorPage() {
                     />
                   )}
                 </div>
+
+                {/* Collaborative Cursor Indicator Tags */}
+                {collaborators.filter((c) => c.cursor?.blockId === block.id).length > 0 && (
+                  <div className="flex flex-col gap-1 items-end ml-2 self-center shrink-0">
+                    {collaborators
+                      .filter((c) => c.cursor?.blockId === block.id)
+                      .map((c) => (
+                        <Badge
+                          key={c.socketId}
+                          variant="outline"
+                          className="text-[9px] py-0.5 px-1.5 gap-1 select-none animate-fade-in"
+                          style={{
+                            color: getCollaboratorColor(c.userId),
+                            borderColor: getCollaboratorColor(c.userId) + "30",
+                            backgroundColor: getCollaboratorColor(c.userId) + "08",
+                          }}
+                        >
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{ backgroundColor: getCollaboratorColor(c.userId) }}
+                          />
+                          {c.name}
+                          {c.typing && <span className="animate-pulse">✍️</span>}
+                        </Badge>
+                      ))}
+                  </div>
+                )}
 
                 {/* Inline AI autocomplete and delete actions */}
                 {!isReadOnly && (
@@ -936,10 +1029,10 @@ export default function DocumentEditorPage() {
               <div className="space-y-3 pt-4 border-t">
                 <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Collaborators</Label>
                 <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
-                  {collaborators.length === 0 ? (
+                  {invitedCollaborators.length === 0 ? (
                     <p className="text-xs text-muted-foreground italic">No collaborators invited yet.</p>
                   ) : (
-                    collaborators.map((collab) => (
+                    invitedCollaborators.map((collab) => (
                       <div key={collab.id} className="flex items-center justify-between text-xs p-2 rounded-lg bg-muted/40 border border-muted/30">
                         <div className="min-w-0">
                           <p className="font-semibold truncate text-foreground">{collab.user.name || "Collaborator"}</p>
@@ -1022,9 +1115,23 @@ export default function DocumentEditorPage() {
                           <span>v{ver.version}: {ver.title}</span>
                           <Badge variant="secondary" className="text-[8px] py-0">Active</Badge>
                         </div>
-                        <p className="text-[10px] text-muted-foreground italic truncate mb-1">
-                          {ver.summary || "Automatic check"}
-                        </p>
+                        {(() => {
+                          const parts = ver.summary?.split(" | Hash: ") || [];
+                          const baseSummary = parts[0] || "Automatic check";
+                          const hash = parts[1];
+                          return (
+                            <>
+                              <p className="text-[10px] text-muted-foreground italic truncate mb-1">
+                                {baseSummary}
+                              </p>
+                              {hash && (
+                                <p className="text-[8px] font-mono text-muted-foreground/60 select-all truncate mt-1 bg-muted/50 p-1 rounded" title={`SHA-256 Hash: ${hash}`}>
+                                  SHA-256: {hash}
+                                </p>
+                              )}
+                            </>
+                          );
+                        })()}
                         <div className="flex justify-between items-center text-[10px] text-muted-foreground/80 mt-2">
                           <span>By: {ver.createdBy}</span>
                           <span>{new Date(ver.createdAt).toLocaleDateString()}</span>
@@ -1047,24 +1154,85 @@ export default function DocumentEditorPage() {
                     </DialogDescription>
                   </DialogHeader>
 
-                  <ScrollArea className="flex-1 my-4 border p-4 rounded-lg bg-muted/20">
+                   <ScrollArea className="flex-1 my-4 border p-4 rounded-lg bg-muted/20">
                     <div className="space-y-4">
-                      {((previewVersion.content as any)?.blocks || []).map((b: any) => (
-                        <div key={b.id} className="p-2 border-b border-muted/30">
-                          {b.type.startsWith("heading") ? (
-                            <p className="font-bold text-base text-foreground">{b.text}</p>
-                          ) : b.type === "todo" ? (
-                            <div className="flex items-center gap-2 text-sm text-foreground">
-                              <input type="checkbox" checked={b.checked} readOnly disabled />
-                              <span className={b.checked ? "line-through text-muted-foreground" : ""}>{b.text}</span>
+                      {(() => {
+                        const previewBlocks = (previewVersion.content as any)?.blocks || [];
+                        const currentBlockMap = new Map(blocks.map((b) => [b.id, b]));
+                        const previewBlockMap = new Map(previewBlocks.map((b: any) => [b.id, b]));
+
+                        const combined: Array<{ block: any; status: "same" | "modified" | "deleted" | "added"; currentBlock?: any }> = [];
+
+                        // 1. Add all blocks from preview, marking if same, modified, or deleted in current document
+                        previewBlocks.forEach((pb: any) => {
+                          const cb = currentBlockMap.get(pb.id);
+                          if (!cb) {
+                            combined.push({ block: pb, status: "deleted" });
+                          } else {
+                            const isDiff = pb.text !== cb.text || pb.type !== cb.type || pb.checked !== cb.checked;
+                            combined.push({ block: pb, status: isDiff ? "modified" : "same", currentBlock: cb });
+                          }
+                        });
+
+                        // 2. Add all blocks from current that do not exist in preview, marking them as added in current
+                        blocks.forEach((cb) => {
+                          if (!previewBlockMap.has(cb.id)) {
+                            combined.push({ block: cb, status: "added" });
+                          }
+                        });
+
+                        return combined.map(({ block: b, status, currentBlock }) => {
+                          const bgClass =
+                            status === "added"
+                              ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-700"
+                              : status === "deleted"
+                              ? "bg-red-500/10 border-red-500/20 text-red-600 line-through"
+                              : status === "modified"
+                              ? "bg-amber-500/10 border-amber-500/20 text-amber-800"
+                              : "border-transparent text-foreground";
+
+                          const statusLabel =
+                            status === "added"
+                              ? " [Added in active]"
+                              : status === "deleted"
+                              ? " [Deleted in active]"
+                              : status === "modified"
+                              ? " [Modified]"
+                              : "";
+
+                          return (
+                            <div key={b.id} className={`p-3 border rounded-lg transition-all ${bgClass}`}>
+                              <div className="flex items-center justify-between gap-2 mb-1.5 border-b border-muted-foreground/10 pb-1">
+                                <span className="text-[9px] uppercase font-bold tracking-wider text-muted-foreground/80">
+                                  {b.type} {statusLabel}
+                                </span>
+                              </div>
+
+                              {b.type.startsWith("heading") ? (
+                                <p className="font-bold text-base">{b.text}</p>
+                              ) : b.type === "todo" ? (
+                                <div className="flex items-center gap-2 text-sm">
+                                  <input type="checkbox" checked={b.checked || false} readOnly disabled />
+                                  <span className={b.checked ? "line-through opacity-70" : ""}>{b.text}</span>
+                                </div>
+                              ) : b.type === "code" ? (
+                                <pre className="font-mono text-xs p-2 bg-background/60 border rounded leading-relaxed overflow-x-auto">{b.text}</pre>
+                              ) : (
+                                <p className="text-sm leading-relaxed">{b.text}</p>
+                              )}
+
+                              {status === "modified" && currentBlock && (
+                                <div className="mt-2.5 pt-2 border-t border-amber-500/20 text-xs text-muted-foreground space-y-1">
+                                  <p className="font-semibold uppercase tracking-wider text-[8px] text-amber-700">Active Current Value:</p>
+                                  <p className="text-foreground italic">
+                                    {currentBlock.text || <span className="text-muted-foreground font-light">Empty content</span>}
+                                  </p>
+                                </div>
+                              )}
                             </div>
-                          ) : b.type === "code" ? (
-                            <pre className="font-mono text-xs p-2.5 bg-background border rounded">{b.text}</pre>
-                          ) : (
-                            <p className="text-sm text-foreground leading-relaxed">{b.text}</p>
-                          )}
-                        </div>
-                      ))}
+                          );
+                        });
+                      })()}
                     </div>
                   </ScrollArea>
 
@@ -1239,6 +1407,31 @@ export default function DocumentEditorPage() {
           </aside>
         )}
       </div>
+
+      {/* Conflict Resolution Choice Modal */}
+      {conflictData && (
+        <ConflictDialog
+          isOpen={conflictOpen}
+          onClose={() => setConflictOpen(false)}
+          onResolve={(choice) => {
+            setConflictOpen(false);
+            resolveConflictChoice(choice, conflictData);
+          }}
+          serverVersion={conflictData.serverVersion}
+          clientVersion={conflictData.clientVersion}
+          conflictData={conflictData}
+        />
+      )}
     </div>
   );
+}
+
+function getCollaboratorColor(userId: string) {
+  const colors = ["#3b82f6", "#10b981", "#6366f1", "#8b5cf6", "#ec4899", "#f97316"];
+  let hash = 0;
+  for (let i = 0; i < userId.length; i++) {
+    hash = userId.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % colors.length;
+  return colors[index];
 }
