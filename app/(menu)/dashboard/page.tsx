@@ -1,7 +1,11 @@
-const page = () => {
-  return (
-    <div>Dashboard</div>
-  )
-}
+import Analytic from "@/components/elements/anayaltic";
 
-export default page
+const Page = () => {
+  return (
+    <>
+      <Analytic />
+    </>
+  );
+};
+
+export default Page;

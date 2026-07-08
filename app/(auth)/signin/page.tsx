@@ -21,12 +21,10 @@ const Page = () => {
   const router = useRouter();
 
   const [formData, setFormData] = useState({
-    name: "",
     email: "",
     password: "",
   });
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { id, value } = e.target;
@@ -35,11 +33,10 @@ const Page = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
     setLoading(true);
 
     try {
-      const res = await fetch("http://localhost:3000/api/auth/signin", {
+      const res = await fetch("/api/auth/signin", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -53,9 +50,9 @@ const Page = () => {
         throw new Error(data?.message || "Something went wrong");
       }
 
-      // success — redirect wherever makes sense, e.g. login page
-      toast.success("Sign in successful")
+      toast.success("Sign in successful");
       router.push("/dashboard");
+      router.refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -64,56 +61,61 @@ const Page = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>Signup an account</CardTitle>
-          <CardDescription>
-            Enter your details below to create your account
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/40 p-4">
+      <Card className="w-full max-w-sm shadow-xl border-muted/50 backdrop-blur-sm bg-card/90">
+        <CardHeader className="space-y-1">
+          <div className="flex items-center gap-2 mb-2 justify-center">
+            <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground font-bold">
+              D
+            </div>
+            <span className="font-bold text-xl tracking-tight">DocFlow</span>
+          </div>
+          <CardTitle className="text-2xl text-center">Welcome Back</CardTitle>
+          <CardDescription className="text-center">
+            Enter your credentials to access your account
           </CardDescription>
-          <CardAction>
-            <Link href="/signup">
-              <Button variant="link">Sign Up</Button>
-            </Link>
-          </CardAction>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit}>
-            <div className="flex flex-col gap-6">
-             
-              <div className="grid gap-2">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="m@example.com"
-                  value={formData.email}
-                  onChange={handleChange}
-                  required
-                />
-              </div>
-              <div className="grid gap-2">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="grid gap-2">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="m@example.com"
+                value={formData.email}
+                onChange={handleChange}
+                required
+                className="bg-background/50"
+              />
+            </div>
+            <div className="grid gap-2">
+              <div className="flex items-center justify-between">
                 <Label htmlFor="password">Password</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  value={formData.password}
-                  onChange={handleChange}
-                  required
-                />
               </div>
+              <Input
+                id="password"
+                type="password"
+                value={formData.password}
+                onChange={handleChange}
+                required
+                className="bg-background/50"
+              />
             </div>
 
-            <CardFooter className="flex-col gap-2 px-0 pt-6">
-              <Button type="submit" className="w-full" disabled={loading}>
-                {loading ? "Creating account..." : "Sign In"}
-              </Button>
-              <Button variant="outline" className="w-full" type="button">
-                Sign up with Google
-              </Button>
-            </CardFooter>
+            <Button type="submit" className="w-full mt-2 font-medium" disabled={loading}>
+              {loading ? "Signing in..." : "Sign In"}
+            </Button>
           </form>
         </CardContent>
+        <CardFooter className="flex flex-col gap-3 border-t pt-4">
+          <p className="text-xs text-muted-foreground text-center">
+            Don't have an account?{" "}
+            <Link href="/signup" className="text-primary hover:underline font-medium">
+              Sign Up
+            </Link>
+          </p>
+        </CardFooter>
       </Card>
     </div>
   );

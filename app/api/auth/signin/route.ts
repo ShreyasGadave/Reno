@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
           success: false,
           message: "Email and password are required.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -23,20 +23,17 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    if (!user) {
+    if (!user || !user.password) {
       return NextResponse.json(
         {
           success: false,
           message: "Invalid email or password.",
         },
-        { status: 401 }
+        { status: 401 },
       );
     }
 
-    const isPasswordCorrect = await bcrypt.compare(
-      password,
-      user.password
-    );
+    const isPasswordCorrect = await bcrypt.compare(password, user.password);
 
     if (!isPasswordCorrect) {
       return NextResponse.json(
@@ -44,7 +41,7 @@ export async function POST(req: NextRequest) {
           success: false,
           message: "Invalid email or password.",
         },
-        { status: 401 }
+        { status: 401 },
       );
     }
 
@@ -55,8 +52,8 @@ export async function POST(req: NextRequest) {
       },
       process.env.JWT_SECRET!,
       {
-        expiresIn: "7d",
-      }
+        expiresIn: "15m",
+      },
     );
 
     const response = NextResponse.json({
@@ -69,15 +66,15 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    response.cookies.set({
-      name: "token",
-      value: token,
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7, // 7 days
-    });
+   response.cookies.set({
+  name: "token",
+  value: token,
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "lax",
+  path: "/",
+  maxAge: 15 * 60, // 15 minutes
+});
 
     return response;
   } catch (error) {
@@ -90,7 +87,7 @@ export async function POST(req: NextRequest) {
       },
       {
         status: 500,
-      }
+      },
     );
   }
 }

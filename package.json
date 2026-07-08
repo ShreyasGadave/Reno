@@ -16,6 +16,7 @@
     "@prisma/client": "^7.8.0",
     "@remixicon/react": "^4.9.0",
     "@shadcn/react": "^0.2.0",
+    "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
