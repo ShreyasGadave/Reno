@@ -10,21 +10,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <SidebarTrigger className="cursor-pointer" />
           <div className="flex-1" />
         </header>
-        <main className="flex-1 p-6">
+        <main className="px-6 pt-6">
           {children}
         </main>
-        <footer className="mt-auto border-t py-4 text-center text-xs text-muted-foreground bg-muted/20">
-          <div className="container mx-auto flex flex-col sm:flex-row items-center justify-between px-6 gap-2">
-            <span>DocFlow Editor • Fullstack Assignment 2</span>
-            <span className="flex items-center gap-2.5">
-              <span>Developer: <strong>Shreyas Gadave</strong></span>
-              <span className="text-muted-foreground/45">•</span>
-              <a href="https://github.com/ShreyasGadave" target="_blank" rel="noopener noreferrer" className="hover:text-primary hover:underline font-semibold">GitHub</a>
-              <span className="text-muted-foreground/45">•</span>
-              <a href="https://linkedin.com/in/shreyas-gadave" target="_blank" rel="noopener noreferrer" className="hover:text-primary hover:underline font-semibold">LinkedIn</a>
-            </span>
-          </div>
-        </footer>
+     
       </SidebarInset>
     </SidebarProvider>
   )

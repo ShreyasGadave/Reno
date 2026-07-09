@@ -18,31 +18,37 @@ export function useSocket(documentId: string, userName?: string) {
   const [socketConnected, setSocketConnected] = useState(false);
   const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
   const socketRef = useRef<Socket | null>(null);
+  const userNameRef = useRef(userName);
 
-  // Initialize and connect socket
+  useEffect(() => {
+    userNameRef.current = userName;
+  }, [userName]);
+
   useEffect(() => {
     if (!documentId) return;
 
     const socket = getSocket();
     socketRef.current = socket;
 
-    if (!socket.connected) {
-      socket.connect();
-    }
-
+    if (!socket.connected) socket.connect();
     setSocketConnected(socket.connected);
 
     const handleConnect = () => {
       setSocketConnected(true);
-      socket.emit("join-document", { documentId, name: userName });
+      socket.emit("join-document", { documentId, name: userNameRef.current });
     };
 
     const handleDisconnect = () => {
+      console.log("🔌 [Socket Event] Disconnected from Socket Server.");
       setSocketConnected(false);
     };
 
+    const handleConnectError = (err: Error) => {
+      console.error("🔌 [Socket Event] Connection Error:", err.message);
+    };
+
     const handlePresenceUpdate = (members: Collaborator[]) => {
-      // Exclude current user from collaborators list to simplify cursor rendering
+      console.log("🔌 [Socket Event] Presence update received. Collaborator count:", members.length);
       const filtered = members.filter((m) => m.socketId !== socket.id);
       setCollaborators(filtered);
     };
@@ -62,6 +68,7 @@ export function useSocket(documentId: string, userName?: string) {
     // Attach listeners
     socket.on("connect", handleConnect);
     socket.on("disconnect", handleDisconnect);
+    socket.on("connect_error", handleConnectError);
     socket.on("presence:update", handlePresenceUpdate);
     socket.on("document:cursor", handleRemoteCursor);
     socket.on("document:typing", handleRemoteTyping);
@@ -72,14 +79,18 @@ export function useSocket(documentId: string, userName?: string) {
     }
 
     return () => {
-      // Clean up listeners and emit leave or let server disconnect do it
+      console.log("🔌 [Socket Connection] Cleaning up socket listeners for document:", documentId);
       socket.off("connect", handleConnect);
       socket.off("disconnect", handleDisconnect);
+      socket.off("connect_error", handleConnectError);
       socket.off("presence:update", handlePresenceUpdate);
       socket.off("document:cursor", handleRemoteCursor);
       socket.off("document:typing", handleRemoteTyping);
+      
+      // Close socket connection on component unmount to prevent leaks and clear presence
+          socket.disconnect();
     };
-  }, [documentId, userName]);
+  }, [documentId]);
 
   // Emit cursor positions
   const sendCursor = useCallback(

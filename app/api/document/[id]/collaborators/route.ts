@@ -225,6 +225,13 @@ export async function DELETE(
       return NextResponse.json({ message: "Document not found" }, { status: 404 });
     }
 
+    console.log("DELETE Collaborator debug:", {
+      documentOwnerId: document.ownerId,
+      currentUserId: currentUserId,
+      areEqual: document.ownerId === currentUserId,
+      userSession: session.user,
+    });
+
     if (document.ownerId !== currentUserId) {
       return NextResponse.json(
         { message: "Only the owner can remove collaborators" },

@@ -210,9 +210,9 @@ export default function AllDocuments({ filter = "all" }: { filter?: string }) {
               New Document
             </Button>
           )}
-          <Badge variant="secondary" className="px-2.5 py-1 text-xs">
-            {filteredDocs.length} Documents
-          </Badge>
+          <Button variant={"secondary"} className="shadow-md shadow-primary/10">
+            {filteredDocs.length} Document
+          </Button>
         </div>
       </div>
 

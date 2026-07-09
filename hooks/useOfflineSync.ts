@@ -19,7 +19,7 @@ export function useOfflineSync(
   documentId: string,
   socket: Socket | null,
   socketConnected: boolean,
-  onConflict: (data: ConflictData) => void
+  onConflict: (data: ConflictData) => void,
 ) {
   const [isOnline, setIsOnline] = useState(true);
   const [syncState, setSyncState] = useState<SyncState>("synced");
@@ -79,16 +79,166 @@ export function useOfflineSync(
   useEffect(() => {
     if (!socket || !socketConnected || !documentId) return;
 
+    console.log(
+      "💾 [Offline Sync] Registering socket event listeners inside useOfflineSync hook.",
+    );
+
     // Joined Document callback
-    socket.on("document:joined", async (data: { role: string; document: any }) => {
+    socket.on(
+      "document:joined",
+      async (data: { role: string; document: any }) => {
+        try {
+          console.log(
+            "💾 [Offline Sync Event] Received 'document:joined'. Document:",
+            data.document.id,
+          );
+          const cached = await localDB.getDocument(documentId);
+          const serverDoc = data.document;
+
+          // If local is missing or has older version without pending changes, initialize with server data
+          const queue = await localDB.getSyncQueueForDocument(documentId);
+
+          if (
+            !cached ||
+            (serverDoc.currentVersion > cached.version && queue.length === 0)
+          ) {
+            console.log(
+              "💾 [Offline Sync Event] Initializing IndexedDB with server document state.",
+            );
+            const docToSave: LocalDocument = {
+              id: serverDoc.id,
+              title: serverDoc.title,
+              description: serverDoc.description || "",
+              content: serverDoc.content || { blocks: [] },
+              visibility: serverDoc.visibility,
+              status: serverDoc.status,
+              isFavorite: serverDoc.isFavorite,
+              isArchived: serverDoc.isArchived,
+              isDeleted: serverDoc.isDeleted,
+              version: serverDoc.currentVersion,
+              ownerId: serverDoc.ownerId,
+              updatedAt: serverDoc.updatedAt,
+              localChangesCount: 0,
+            };
+            await localDB.saveDocument(docToSave);
+            setLocalDoc(docToSave);
+          }
+
+          // If client joined and has pending queue items, replay them now
+          if (queue.length > 0) {
+            console.log(
+              "💾 [Offline Sync Event] Replaying offline changes queue, length:",
+              queue.length,
+            );
+            replayOfflineQueue();
+          }
+        } catch (err) {
+          console.error("Error handling document join sync:", err);
+        }
+      },
+    );
+
+    // Remote edits broadcast
+    socket.on("document:updated", async (data: any) => {
       try {
-        const cached = await localDB.getDocument(documentId);
-        const serverDoc = data.document;
-
-        // If local is missing or has older version without pending changes, initialize with server data
+        console.log(
+          "💾 [Offline Sync Event] Received 'document:updated'. Broadcasted by user:",
+          data.userName,
+        );
         const queue = await localDB.getSyncQueueForDocument(documentId);
+        // Only adopt remote changes if we do NOT have un-synchronized local changes
+        if (queue.length === 0) {
+          const cached = await localDB.getDocument(documentId);
+          if (cached) {
+            cached.content = data.content;
+            cached.title = data.title;
+            cached.description = data.description || "";
+            // Keep version synced to client edits
+            cached.version = data.version;
+            await localDB.saveDocument(cached);
+            setLocalDoc(cached);
+            setSyncState("synced");
 
-        if (!cached || (serverDoc.currentVersion > cached.version && queue.length === 0)) {
+            // Highlight background sync with collaborator initials toast
+            toast.info(
+              `${data.userName || "Another collaborator"} updated this document. Changes synced automatically.`,
+              {
+                duration: 3000,
+              },
+            );
+          }
+        } else {
+          console.log(
+            "💾 [Offline Sync Event] Skipped remote update because local changes are in queue.",
+          );
+        }
+      } catch (err) {
+        console.error("Error handling remote update:", err);
+      }
+    });
+
+    // Persistent save success confirmation
+    socket.on(
+      "document:persisted",
+      async (data: {
+        version: number;
+        updatedAt: string;
+        lastEditedBy: string;
+      }) => {
+        try {
+          console.log(
+            "💾 [Offline Sync Event] Received 'document:persisted' confirmation. Server version:",
+            data.version,
+          );
+          const cached = await localDB.getDocument(documentId);
+          if (cached) {
+            cached.version = data.version;
+            cached.updatedAt = data.updatedAt;
+            await localDB.saveDocument(cached);
+            setLocalDoc(cached);
+          }
+          if (persistTimeoutRef.current)
+            clearTimeout(persistTimeoutRef.current);
+          await localDB.clearSyncQueueForDocument(documentId);
+          setPendingChanges(0);
+          setSyncState("synced");
+        } catch (err) {
+          console.error("Error confirming persistence:", err);
+        }
+      },
+    );
+
+    // Conflict hook
+    socket.on("conflict:detected", (data: ConflictData) => {
+      console.log(
+        "💾 [Offline Sync Event] Received 'conflict:detected' from server.",
+      );
+      setSyncState("error");
+      onConflict(data);
+    });
+
+    socket.on("document:error", (msg: string) => {
+      console.error("💾 [Offline Sync Event] Received 'document:error':", msg);
+      toast.error(msg);
+      setSyncState("error");
+    });
+
+    socket.on(
+      "document:created",
+      async (data: { tempId: string; document: any }) => {
+        try {
+          const tempId = data.tempId;
+          const serverDoc = data.document;
+          console.log(
+            "💾 [Offline Sync Event] Received 'document:created' converting temp id:",
+            tempId,
+            "to server id:",
+            serverDoc.id,
+          );
+
+          await localDB.deleteDocument(tempId);
+          await localDB.clearSyncQueueForDocument(tempId);
+
           const docToSave: LocalDocument = {
             id: serverDoc.id,
             title: serverDoc.title,
@@ -105,112 +255,29 @@ export function useOfflineSync(
             localChangesCount: 0,
           };
           await localDB.saveDocument(docToSave);
-          setLocalDoc(docToSave);
-        }
 
-        // If client joined and has pending queue items, replay them now
-        if (queue.length > 0) {
-          replayOfflineQueue();
-        }
-      } catch (err) {
-        console.error("Error handling document join sync:", err);
-      }
-    });
-
-    // Remote edits broadcast
-    socket.on("document:updated", async (data: any) => {
-      try {
-        const queue = await localDB.getSyncQueueForDocument(documentId);
-        // Only adopt remote changes if we do NOT have un-synchronized local changes
-        if (queue.length === 0) {
-          const cached = await localDB.getDocument(documentId);
-          if (cached) {
-            cached.content = data.content;
-            cached.title = data.title;
-            cached.description = data.description || "";
-            // Keep version synced to client edits
-            cached.version = data.version;
-            await localDB.saveDocument(cached);
-            setLocalDoc(cached);
-            setSyncState("synced");
-            
-            // Highlight background sync with collaborator initials toast
-            toast.info(`${data.userName || "Another collaborator"} updated this document. Changes synced automatically.`, {
-              duration: 3000,
-            });
+          if (
+            typeof window !== "undefined" &&
+            window.location.pathname.includes(tempId)
+          ) {
+            window.history.replaceState(null, "", `/document/${serverDoc.id}`);
+            window.location.reload();
           }
+
+          toast.success("Offline document successfully synchronized!");
+        } catch (err) {
+          console.error(
+            "Failed to process server document creation event:",
+            err,
+          );
         }
-      } catch (err) {
-        console.error("Error handling remote update:", err);
-      }
-    });
-
-    // Persistent save success confirmation
-    socket.on("document:persisted", async (data: { version: number; updatedAt: string; lastEditedBy: string }) => {
-      try {
-        const cached = await localDB.getDocument(documentId);
-        if (cached) {
-          cached.version = data.version;
-          cached.updatedAt = data.updatedAt;
-          await localDB.saveDocument(cached);
-          setLocalDoc(cached);
-        }
-        await localDB.clearSyncQueueForDocument(documentId);
-        setPendingChanges(0);
-        setSyncState("synced");
-      } catch (err) {
-        console.error("Error confirming persistence:", err);
-      }
-    });
-
-    // Conflict hook
-    socket.on("conflict:detected", (data: ConflictData) => {
-      setSyncState("error");
-      onConflict(data);
-    });
-
-    socket.on("document:error", (msg: string) => {
-      toast.error(msg);
-      setSyncState("error");
-    });
-
-    socket.on("document:created", async (data: { tempId: string; document: any }) => {
-      try {
-        const tempId = data.tempId;
-        const serverDoc = data.document;
-
-        await localDB.deleteDocument(tempId);
-        await localDB.clearSyncQueueForDocument(tempId);
-
-        const docToSave: LocalDocument = {
-          id: serverDoc.id,
-          title: serverDoc.title,
-          description: serverDoc.description || "",
-          content: serverDoc.content || { blocks: [] },
-          visibility: serverDoc.visibility,
-          status: serverDoc.status,
-          isFavorite: serverDoc.isFavorite,
-          isArchived: serverDoc.isArchived,
-          isDeleted: serverDoc.isDeleted,
-          version: serverDoc.currentVersion,
-          ownerId: serverDoc.ownerId,
-          updatedAt: serverDoc.updatedAt,
-          localChangesCount: 0,
-        };
-        await localDB.saveDocument(docToSave);
-
-        if (typeof window !== "undefined" && window.location.pathname.includes(tempId)) {
-          window.history.replaceState(null, "", `/document/${serverDoc.id}`);
-          window.location.reload();
-        }
-        
-        toast.success("Offline document successfully synchronized!");
-      } catch (err) {
-        console.error("Failed to process server document creation event:", err);
-      }
-    });
+      },
+    );
 
     return () => {
+      console.log(
+        "💾 [Offline Sync] Cleaning up useOfflineSync socket listeners.",
+      );
       socket.off("document:joined");
       socket.off("document:updated");
       socket.off("document:persisted");
@@ -272,6 +339,8 @@ export function useOfflineSync(
     }
   }, [socketConnected, isOnline, replayOfflineQueue]);
 
+  const persistTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   // 5. Update local cache and emit updates
   const updateDocument = useCallback(
     async (updates: Partial<LocalDocument>) => {
@@ -328,6 +397,11 @@ export function useOfflineSync(
               },
               force: false,
             });
+            if (persistTimeoutRef.current)
+              clearTimeout(persistTimeoutRef.current);
+            persistTimeoutRef.current = setTimeout(() => {
+              setSyncState((prev) => (prev === "syncing" ? "error" : prev));
+            }, 6000);
           }, 400); // 400ms typing debouncer for broadcasts
         } else {
           setSyncState("offline");
@@ -336,12 +410,15 @@ export function useOfflineSync(
         console.error("Local update error:", err);
       }
     },
-    [documentId, localDoc, socket, socketConnected, isOnline]
+    [documentId, localDoc, socket, socketConnected, isOnline],
   );
 
   // 6. Force sync choices (conflict resolution)
   const resolveConflictChoice = useCallback(
-    async (choice: "server" | "client" | "merge", serverData?: ConflictData) => {
+    async (
+      choice: "server" | "client" | "merge",
+      serverData?: ConflictData,
+    ) => {
       if (!documentId || !localDoc || !socket || !socketConnected) return;
 
       try {
@@ -397,7 +474,9 @@ export function useOfflineSync(
           let baseBlocks: any[] = [];
           if (baseRes.ok) {
             const data = await baseRes.json();
-            const baseVer = data.versions?.find((v: any) => v.version === localDoc.version);
+            const baseVer = data.versions?.find(
+              (v: any) => v.version === localDoc.version,
+            );
             if (baseVer) {
               baseBlocks = baseVer.content?.blocks || [];
             }
@@ -407,7 +486,11 @@ export function useOfflineSync(
           const serverBlocks = serverData.serverContent?.blocks || [];
 
           // Perform merge logic
-          const merged = localThreeWayMerge(baseBlocks, clientBlocks, serverBlocks);
+          const merged = localThreeWayMerge(
+            baseBlocks,
+            clientBlocks,
+            serverBlocks,
+          );
 
           const mergedDoc: LocalDocument = {
             ...localDoc,
@@ -443,7 +526,7 @@ export function useOfflineSync(
         setSyncState("error");
       }
     },
-    [documentId, localDoc, socket, socketConnected]
+    [documentId, localDoc, socket, socketConnected],
   );
 
   return {
@@ -459,7 +542,11 @@ export function useOfflineSync(
 }
 
 // 3-Way Block-Level merge function client-side duplicate
-function localThreeWayMerge(baseBlocks: any[], clientBlocks: any[], serverBlocks: any[]): any[] {
+function localThreeWayMerge(
+  baseBlocks: any[],
+  clientBlocks: any[],
+  serverBlocks: any[],
+): any[] {
   const baseMap = new Map(baseBlocks.map((b) => [b.id, b]));
   const serverMap = new Map(serverBlocks.map((b) => [b.id, b]));
   const clientMap = new Map(clientBlocks.map((b) => [b.id, b]));
@@ -500,7 +587,10 @@ function localThreeWayMerge(baseBlocks: any[], clientBlocks: any[], serverBlocks
       } else if (serverB && !clientB) {
         resolvedMap.set(id, serverB);
       } else if (clientB && serverB) {
-        resolvedMap.set(id, clientB.updatedAt >= serverB.updatedAt ? clientB : serverB);
+        resolvedMap.set(
+          id,
+          clientB.updatedAt >= serverB.updatedAt ? clientB : serverB,
+        );
       }
     } else {
       if (serverB && !clientB) {

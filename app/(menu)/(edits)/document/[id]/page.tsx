@@ -31,7 +31,7 @@ import {
   Lock,
   Globe,
   Share2,
-  RotateCcw
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -72,16 +72,15 @@ export default function DocumentEditorPage() {
   const documentId = (params?.id as string) || "";
 
   // States
-  const [currentUser, setCurrentUser] = useState<{ id: string; name: string; email: string } | null>(null);
+  const [currentUser, setCurrentUser] = useState<{
+    id: string;
+    name: string;
+    email: string;
+  } | null>(null);
 
   // Socket Hook
-  const {
-    socketConnected,
-    collaborators,
-    sendCursor,
-    sendTyping,
-    socket,
-  } = useSocket(documentId, currentUser?.name || currentUser?.email || "User");
+  const { socketConnected, collaborators, sendCursor, sendTyping, socket } =
+    useSocket(documentId, currentUser?.name || currentUser?.email || "User");
 
   // Conflict state management
   const [conflictOpen, setConflictOpen] = useState(false);
@@ -102,29 +101,44 @@ export default function DocumentEditorPage() {
     resolveConflictChoice,
     loadLocalDoc,
     syncNow,
-  } = useOfflineSync(documentId, socket, socketConnected, handleConflictDetected);
+  } = useOfflineSync(
+    documentId,
+    socket,
+    socketConnected,
+    handleConflictDetected,
+  );
 
   const [role, setRole] = useState<"OWNER" | "EDITOR" | "VIEWER">("VIEWER");
   const [blocks, setBlocks] = useState<Block[]>([]);
-  const [activeSidebar, setActiveSidebar] = useState<"none" | "history" | "ai" | "share">("none");
+  const [activeSidebar, setActiveSidebar] = useState<
+    "none" | "history" | "ai" | "share"
+  >("none");
   const [loading, setLoading] = useState(true);
 
   // Sharing states
-  const [visibility, setVisibility] = useState<"PRIVATE" | "SHARED" | "PUBLIC">("PRIVATE");
+  const [visibility, setVisibility] = useState<"PRIVATE" | "SHARED" | "PUBLIC">(
+    "PRIVATE",
+  );
   const [invitedCollaborators, setInvitedCollaborators] = useState<any[]>([]);
   const [newCollabEmail, setNewCollabEmail] = useState("");
-  const [newCollabRole, setNewCollabRole] = useState<"EDITOR" | "VIEWER">("EDITOR");
+  const [newCollabRole, setNewCollabRole] = useState<"EDITOR" | "VIEWER">(
+    "EDITOR",
+  );
   const [isShareOpen, setIsShareOpen] = useState(false);
 
   // Version History states
   const [versions, setVersions] = useState<LocalVersion[]>([]);
-  const [previewVersion, setPreviewVersion] = useState<LocalVersion | null>(null);
+  const [previewVersion, setPreviewVersion] = useState<LocalVersion | null>(
+    null,
+  );
   const [newSnapshotTitle, setNewSnapshotTitle] = useState("");
 
   // AI assistant states
   const [aiTone, setAiTone] = useState("professional");
   const [aiChatQuery, setAiChatQuery] = useState("");
-  const [aiChatHistory, setAiChatHistory] = useState<Array<{ sender: "user" | "ai"; text: string }>>([]);
+  const [aiChatHistory, setAiChatHistory] = useState<
+    Array<{ sender: "user" | "ai"; text: string }>
+  >([]);
   const [aiLoading, setAiLoading] = useState(false);
 
   const isReadOnly = role === "VIEWER";
@@ -145,14 +159,32 @@ export default function DocumentEditorPage() {
   const initializeDocument = useCallback(async () => {
     try {
       setLoading(true);
+      console.log("📝 [Editor Page] Initializing document:", documentId);
       // Try to load cached document from IndexedDB
       const cached = await localDB.getDocument(documentId);
 
       if (cached) {
+        console.log(
+          "📝 [Editor Page] Cached document loaded from IndexedDB. Blocks count:",
+          cached.content.blocks?.length,
+        );
         setBlocks(cached.content.blocks || []);
         setVisibility(cached.visibility);
+
+        // Optimistic fallback role configuration
+        if (
+          cached.ownerId === currentUser?.id ||
+          documentId.startsWith("temp_")
+        ) {
+          setRole("OWNER");
+        } else {
+          setRole("EDITOR");
+        }
       }
 
+      console.log(
+        "📝 [Editor Page] Fetching latest document details from server...",
+      );
       // Fetch latest from server
       const res = await fetch(`/api/document/${documentId}`);
       if (!res.ok) {
@@ -165,6 +197,10 @@ export default function DocumentEditorPage() {
       }
 
       const data = await res.json();
+      console.log(
+        "📝 [Editor Page] Server document fetch succeeded. User role:",
+        data.role,
+      );
       setRole(data.role);
       setVisibility(data.document.visibility);
 
@@ -193,12 +229,27 @@ export default function DocumentEditorPage() {
         setBlocks(serverDoc.content.blocks);
       }
     } catch (error) {
-      console.error("Initialize error:", error);
+      console.warn("📝 [Editor Page] Initialize fetch error:", error);
       toast.warning("Failed to sync. Running in offline mode.");
+
+      // Fallback role resolution for offline editor usage
+      const cached = await localDB.getDocument(documentId);
+      if (cached) {
+        if (
+          cached.ownerId === currentUser?.id ||
+          documentId.startsWith("temp_")
+        ) {
+          setRole("OWNER");
+        } else {
+          setRole("EDITOR");
+        }
+      } else if (documentId.startsWith("temp_")) {
+        setRole("OWNER");
+      }
     } finally {
       setLoading(false);
     }
-  }, [documentId, router, loadLocalDoc]);
+  }, [documentId, router, loadLocalDoc, currentUser]);
 
   useEffect(() => {
     initializeDocument();
@@ -214,6 +265,10 @@ export default function DocumentEditorPage() {
 
   // Save changes to IndexedDB and queue sync
   const saveBlocks = async (newBlocks: Block[]) => {
+    console.log(
+      "📝 [Editor Page] Saving blocks list. Count:",
+      newBlocks.length,
+    );
     setBlocks(newBlocks);
     if (isReadOnly) return;
 
@@ -226,6 +281,8 @@ export default function DocumentEditorPage() {
 
   const typingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const handleBlockChange = (id: string, text: string) => {
     const updated = blocks.map((b) =>
       b.id === id
@@ -235,18 +292,19 @@ export default function DocumentEditorPage() {
             updatedAt: Date.now(),
             updatedBy: currentUser?.name || currentUser?.email || "User",
           }
-        : b
+        : b,
     );
-    saveBlocks(updated);
+    setBlocks(updated); // update UI immediately, no network involved
 
-    // Send typing presence
     sendTyping(true);
-    if (typingTimerRef.current) {
-      clearTimeout(typingTimerRef.current);
-    }
-    typingTimerRef.current = setTimeout(() => {
-      sendTyping(false);
-    }, 1500);
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => sendTyping(false), 1500);
+
+    // debounce the actual sync call
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveBlocks(updated);
+    }, 600); // adjust to taste
   };
 
   const handleCheckboxChange = (id: string, checked: boolean) => {
@@ -258,7 +316,7 @@ export default function DocumentEditorPage() {
             updatedAt: Date.now(),
             updatedBy: currentUser?.name || currentUser?.email || "User",
           }
-        : b
+        : b,
     );
     saveBlocks(updated);
   };
@@ -272,13 +330,21 @@ export default function DocumentEditorPage() {
             updatedAt: Date.now(),
             updatedBy: currentUser?.name || currentUser?.email || "User",
           }
-        : b
+        : b,
     );
     saveBlocks(updated);
   };
 
   const handleAddBlock = (index: number) => {
-    if (isReadOnly) return;
+    if (isReadOnly) {
+      console.warn(
+        "📝 [Editor Page] Add block blocked because page is read-only (role:",
+        role,
+        ")",
+      );
+      return;
+    }
+    console.log("📝 [Editor Page] Adding new block below index:", index);
     const newBlock: Block = {
       id: Math.random().toString(36).substr(2, 9),
       type: "paragraph",
@@ -315,7 +381,10 @@ export default function DocumentEditorPage() {
     saveBlocks(newBlocks);
   };
 
-  const handleMetadataChange = async (updates: { title?: string; description?: string }) => {
+  const handleMetadataChange = async (updates: {
+    title?: string;
+    description?: string;
+  }) => {
     if (isReadOnly) return;
     await updateDocument(updates);
   };
@@ -359,11 +428,38 @@ export default function DocumentEditorPage() {
     }
   };
 
+  const handleUpdateCollaboratorRole = async (
+    email: string,
+    newRole: "EDITOR" | "VIEWER",
+  ) => {
+    try {
+      const res = await fetch(`/api/document/${documentId}/collaborators`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, role: newRole }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok) {
+        toast.success("Collaborator permissions updated");
+        fetchCollaborators();
+      } else {
+        toast.error(data.message || "Failed to update permissions");
+      }
+    } catch {
+      toast.error("Failed to update permissions");
+    }
+  };
+
   const handleRemoveCollaborator = async (userIdToRemove: string) => {
     try {
-      const res = await fetch(`/api/document/${documentId}/collaborators?userId=${userIdToRemove}`, {
-        method: "DELETE",
-      });
+      const res = await fetch(
+        `/api/document/${documentId}/collaborators?userId=${userIdToRemove}`,
+        {
+          method: "DELETE",
+        },
+      );
 
       if (res.ok) {
         toast.success("Collaborator removed");
@@ -376,7 +472,9 @@ export default function DocumentEditorPage() {
     }
   };
 
-  const handleVisibilityChange = async (newVisibility: "PRIVATE" | "SHARED" | "PUBLIC") => {
+  const handleVisibilityChange = async (
+    newVisibility: "PRIVATE" | "SHARED" | "PUBLIC",
+  ) => {
     if (isReadOnly) return;
     try {
       await updateDocument({ visibility: newVisibility });
@@ -416,7 +514,10 @@ export default function DocumentEditorPage() {
       const res = await fetch(`/api/document/${documentId}/versions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: newSnapshotTitle, summary: "Manual snapshot" }),
+        body: JSON.stringify({
+          title: newSnapshotTitle,
+          summary: "Manual snapshot",
+        }),
       });
 
       if (res.ok) {
@@ -436,7 +537,11 @@ export default function DocumentEditorPage() {
       toast.error("Viewers are not authorized to restore states.");
       return;
     }
-    if (!confirm("Are you sure you want to restore the document to this version? A backup of the current state will be created.")) {
+    if (
+      !confirm(
+        "Are you sure you want to restore the document to this version? A backup of the current state will be created.",
+      )
+    ) {
       return;
     }
 
@@ -485,7 +590,10 @@ export default function DocumentEditorPage() {
 
       const data = await res.json();
       if (res.ok) {
-        setAiChatHistory((prev) => [...prev, { sender: "ai", text: data.text }]);
+        setAiChatHistory((prev) => [
+          ...prev,
+          { sender: "ai", text: data.text },
+        ]);
       } else {
         toast.error(data.message || "AI failed to respond");
       }
@@ -608,131 +716,150 @@ export default function DocumentEditorPage() {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       {/* Editor Top Bar */}
-      <header className="sticky top-0 z-30 flex items-center justify-between border-b bg-card/85 backdrop-blur-md px-6 py-3">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => router.push("/documents")}
-            className="cursor-pointer"
-          >
-            <ArrowLeft className="h-5 w-5" />
-          </Button>
-
-          <div className="flex flex-col">
-            <input
-              type="text"
-              value={localDoc?.title || ""}
-              onChange={(e) => handleMetadataChange({ title: e.target.value })}
-              disabled={isReadOnly}
-              className="text-lg font-bold bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-primary rounded px-1 max-w-[240px] md:max-w-md"
-              placeholder="Untitled Document"
-            />
-            {localDoc?.description && (
-              <p className="text-xs text-muted-foreground truncate max-w-xs pl-1">
-                {localDoc.description}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Sync/Status Controls */}
-        <div className="flex items-center gap-3">
-          {/* Connection Status Badge */}
-          {syncState === "synced" && (
-            <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 hover:bg-emerald-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
-              <CheckCircle className="h-3.5 w-3.5" />
-              Synced
-            </Badge>
-          )}
-          {syncState === "syncing" && (
-            <Badge className="bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-              Syncing
-            </Badge>
-          )}
-          {syncState === "offline" && (
-            <Badge className="bg-yellow-500/10 text-yellow-500 border-yellow-500/20 hover:bg-yellow-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
-              <CloudOff className="h-3.5 w-3.5" />
-              Offline
-            </Badge>
-          )}
-          {syncState === "error" && (
-            <Badge className="bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
-              <CloudLightning className="h-3.5 w-3.5" />
-              Sync Error
-            </Badge>
-          )}
-
-          {/* Sync Trigger button */}
-          {isOnline && !isReadOnly && (
+      <header className="sticky top-0 z-30 border-b bg-card/85 backdrop-blur-md">
+        <div className="flex h-16 items-center justify-between px-6">
+          {/* Left Section */}
+          <div className="flex min-w-0 flex-1 items-center gap-4">
             <Button
-              variant="outline"
-              size="sm"
-              onClick={() => syncNow()}
-              className="h-8 text-xs gap-1.5 font-medium cursor-pointer"
+              variant="ghost"
+              size="icon"
+              onClick={() => router.push("/documents")}
+              className="shrink-0 cursor-pointer"
             >
-              <RefreshCw className="h-3 w-3" />
-              Sync Now
+              <ArrowLeft className="h-5 w-5" />
             </Button>
-          )}
 
-          {/* Active Collaborators list */}
-          {collaborators.length > 0 && (
-            <div className="flex items-center gap-1.5 border-l pl-3 mr-1">
-              {collaborators.map((c) => (
-                <div
-                  key={c.socketId}
-                  className="w-7 h-7 rounded-full flex items-center justify-center font-bold text-[10px] text-white border border-background relative uppercase select-none shadow-sm shrink-0"
-                  style={{ backgroundColor: getCollaboratorColor(c.userId) }}
-                  title={`${c.name} (${c.role})${c.typing ? " - Typing..." : ""}`}
-                >
-                  {c.name[0]}
-                  {c.typing && (
-                    <span className="absolute -bottom-0.5 -right-0.5 flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
-                    </span>
-                  )}
-                </div>
-              ))}
+            <div className="min-w-0">
+              <input
+                type="text"
+                value={localDoc?.title || ""}
+                onChange={(e) =>
+                  handleMetadataChange({ title: e.target.value })
+                }
+                disabled={isReadOnly}
+                placeholder="Untitled Document"
+                className="w-full bg-transparent text-lg font-semibold outline-none focus:ring-1 focus:ring-primary rounded px-1"
+              />
+
+              {localDoc?.description && (
+                <p className="truncate text-xs text-muted-foreground pl-1">
+                  {localDoc.description}
+                </p>
+              )}
             </div>
-          )}
+          </div>
 
-          {/* Role badge */}
-          <Badge variant="outline" className="h-7 border-muted-foreground/30 capitalize shrink-0">
-            {role.toLowerCase()}
-          </Badge>
+          {/* Right Section */}
+          <div className="ml-6 flex items-center gap-2 flex-wrap justify-end">
+            {/* Connection Status Badge */}
+            {syncState === "synced" && (
+              <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 hover:bg-emerald-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
+                <CheckCircle className="h-3.5 w-3.5" />
+                Synced
+              </Badge>
+            )}
+            {syncState === "syncing" && (
+              <Badge className="bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                Syncing
+              </Badge>
+            )}
+            {syncState === "offline" && (
+              <Badge className="bg-yellow-500/10 text-yellow-500 border-yellow-500/20 hover:bg-yellow-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
+                <CloudOff className="h-3.5 w-3.5" />
+                Offline
+              </Badge>
+            )}
+            {syncState === "error" && (
+              <Badge className="bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/15 gap-1.5 flex items-center h-7 py-0 px-2.5">
+                <CloudLightning className="h-3.5 w-3.5" />
+                Sync Error
+              </Badge>
+            )}
 
-          {/* Sidebar Toggle Options */}
-          <div className="flex items-center gap-1 border-l pl-3">
-            <Button
-              variant={activeSidebar === "share" ? "default" : "outline"}
-              size="sm"
-              className="h-8 gap-1.5 font-medium cursor-pointer"
-              onClick={() => setActiveSidebar(activeSidebar === "share" ? "none" : "share")}
+            {/* Sync Trigger button */}
+            {isOnline && !isReadOnly && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => syncNow()}
+                className="h-8 text-xs gap-1.5 font-medium cursor-pointer"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Sync Now
+              </Button>
+            )}
+
+            {/* Active Collaborators list */}
+            {collaborators.length > 0 && (
+              <div className="flex items-center gap-1.5 border-l pl-3 mr-1">
+                {Array.from(
+                  new Map(collaborators.map((c) => [c.email, c])).values(),
+                ).map((c) => (
+                  <div
+                    key={c.socketId}
+                    className="w-7 h-7 rounded-full flex items-center justify-center font-bold text-[10px] text-white border border-background relative uppercase select-none shadow-sm shrink-0"
+                    style={{ backgroundColor: getCollaboratorColor(c.userId) }}
+                    title={`${c.name} (${c.role})${c.typing ? " - Typing..." : ""}`}
+                  >
+                    {c.name[0]}
+                    {c.typing && (
+                      <span className="absolute -bottom-0.5 -right-0.5 flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Role badge */}
+            <Badge
+              variant="outline"
+              className="h-7 border-muted-foreground/30 capitalize shrink-0"
             >
-              <Share2 className="h-3.5 w-3.5" />
-              Share
-            </Button>
-            <Button
-              variant={activeSidebar === "history" ? "default" : "outline"}
-              size="sm"
-              className="h-8 gap-1.5 font-medium cursor-pointer"
-              onClick={() => setActiveSidebar(activeSidebar === "history" ? "none" : "history")}
-            >
-              <History className="h-3.5 w-3.5" />
-              History
-            </Button>
-            <Button
-              variant={activeSidebar === "ai" ? "default" : "outline"}
-              size="sm"
-              className="h-8 gap-1.5 font-medium cursor-pointer"
-              onClick={() => setActiveSidebar(activeSidebar === "ai" ? "none" : "ai")}
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              AI Assistant
-            </Button>
+              {role.toLowerCase()}
+            </Badge>
+
+            {/* Sidebar Toggle Options */}
+            <div className="flex items-center gap-1 border-l pl-3">
+              <Button
+                variant={activeSidebar === "share" ? "default" : "outline"}
+                size="sm"
+                className="h-8 gap-1.5 font-medium cursor-pointer"
+                onClick={() =>
+                  setActiveSidebar(activeSidebar === "share" ? "none" : "share")
+                }
+              >
+                <Share2 className="h-3.5 w-3.5" />
+                Share
+              </Button>
+              <Button
+                variant={activeSidebar === "history" ? "default" : "outline"}
+                size="sm"
+                className="h-8 gap-1.5 font-medium cursor-pointer"
+                onClick={() =>
+                  setActiveSidebar(
+                    activeSidebar === "history" ? "none" : "history",
+                  )
+                }
+              >
+                <History className="h-3.5 w-3.5" />
+                History
+              </Button>
+              <Button
+                variant={activeSidebar === "ai" ? "default" : "outline"}
+                size="sm"
+                className="h-8 gap-1.5 font-medium cursor-pointer"
+                onClick={() =>
+                  setActiveSidebar(activeSidebar === "ai" ? "none" : "ai")
+                }
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                AI Assistant
+              </Button>
+            </div>
           </div>
         </div>
       </header>
@@ -745,7 +872,10 @@ export default function DocumentEditorPage() {
           {isReadOnly && (
             <div className="p-3 mb-6 bg-muted/40 border border-muted/50 rounded-lg text-xs text-muted-foreground flex items-center gap-2">
               <Eye className="h-4 w-4 text-primary" />
-              <span>You are viewing this document in Read-Only Mode. Edits cannot be saved.</span>
+              <span>
+                You are viewing this document in Read-Only Mode. Edits cannot be
+                saved.
+              </span>
             </div>
           )}
 
@@ -776,23 +906,42 @@ export default function DocumentEditorPage() {
                   </div>
 
                   <DropdownMenu>
-                    <DropdownMenuTrigger disabled={isReadOnly} className="p-1 hover:bg-muted rounded text-muted-foreground font-bold text-xs select-none cursor-pointer">
+                    <DropdownMenuTrigger
+                      disabled={isReadOnly}
+                      className="p-1 hover:bg-muted rounded text-muted-foreground font-bold text-xs select-none cursor-pointer"
+                    >
                       T
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" className="bg-card">
-                      <DropdownMenuItem onClick={() => handleBlockTypeChange(block.id, "paragraph")}>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          handleBlockTypeChange(block.id, "paragraph")
+                        }
+                      >
                         Paragraph
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleBlockTypeChange(block.id, "heading-1")}>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          handleBlockTypeChange(block.id, "heading-1")
+                        }
+                      >
                         Heading 1
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleBlockTypeChange(block.id, "heading-2")}>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          handleBlockTypeChange(block.id, "heading-2")
+                        }
+                      >
                         Heading 2
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleBlockTypeChange(block.id, "todo")}>
+                      <DropdownMenuItem
+                        onClick={() => handleBlockTypeChange(block.id, "todo")}
+                      >
                         Todo Item
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => handleBlockTypeChange(block.id, "code")}>
+                      <DropdownMenuItem
+                        onClick={() => handleBlockTypeChange(block.id, "code")}
+                      >
                         Code Block
                       </DropdownMenuItem>
                     </DropdownMenuContent>
@@ -805,9 +954,13 @@ export default function DocumentEditorPage() {
                     <input
                       type="text"
                       value={block.text}
-                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onFocus={() =>
+                        sendCursor({ blockId: block.id, offset: 0 })
+                      }
                       onBlur={() => sendCursor(null)}
-                      onChange={(e) => handleBlockChange(block.id, e.target.value)}
+                      onChange={(e) =>
+                        handleBlockChange(block.id, e.target.value)
+                      }
                       disabled={isReadOnly}
                       className="text-2xl font-bold border-0 focus:outline-none w-full bg-transparent text-foreground placeholder-muted-foreground/50"
                       placeholder="Heading 1"
@@ -818,9 +971,13 @@ export default function DocumentEditorPage() {
                     <input
                       type="text"
                       value={block.text}
-                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onFocus={() =>
+                        sendCursor({ blockId: block.id, offset: 0 })
+                      }
                       onBlur={() => sendCursor(null)}
-                      onChange={(e) => handleBlockChange(block.id, e.target.value)}
+                      onChange={(e) =>
+                        handleBlockChange(block.id, e.target.value)
+                      }
                       disabled={isReadOnly}
                       className="text-xl font-semibold border-0 focus:outline-none w-full bg-transparent text-foreground placeholder-muted-foreground/50"
                       placeholder="Heading 2"
@@ -830,9 +987,13 @@ export default function DocumentEditorPage() {
                   {block.type === "paragraph" && (
                     <Textarea
                       value={block.text}
-                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onFocus={() =>
+                        sendCursor({ blockId: block.id, offset: 0 })
+                      }
                       onBlur={() => sendCursor(null)}
-                      onChange={(e) => handleBlockChange(block.id, e.target.value)}
+                      onChange={(e) =>
+                        handleBlockChange(block.id, e.target.value)
+                      }
                       disabled={isReadOnly}
                       rows={1}
                       className="border-0 focus-visible:ring-0 w-full min-h-[32px] p-0 bg-transparent text-foreground resize-none text-sm placeholder-muted-foreground/50 shadow-none leading-relaxed"
@@ -846,18 +1007,26 @@ export default function DocumentEditorPage() {
                         type="checkbox"
                         checked={block.checked || false}
                         disabled={isReadOnly}
-                        onChange={(e) => handleCheckboxChange(block.id, e.target.checked)}
+                        onChange={(e) =>
+                          handleCheckboxChange(block.id, e.target.checked)
+                        }
                         className="rounded border-muted/50 bg-background text-primary focus:ring-primary h-4 w-4"
                       />
                       <input
                         type="text"
                         value={block.text}
-                        onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                        onFocus={() =>
+                          sendCursor({ blockId: block.id, offset: 0 })
+                        }
                         onBlur={() => sendCursor(null)}
-                        onChange={(e) => handleBlockChange(block.id, e.target.value)}
+                        onChange={(e) =>
+                          handleBlockChange(block.id, e.target.value)
+                        }
                         disabled={isReadOnly}
                         className={`text-sm border-0 focus:outline-none w-full bg-transparent text-foreground placeholder-muted-foreground/50 ${
-                          block.checked ? "line-through text-muted-foreground/60" : ""
+                          block.checked
+                            ? "line-through text-muted-foreground/60"
+                            : ""
                         }`}
                         placeholder="Todo checklist item"
                       />
@@ -867,9 +1036,13 @@ export default function DocumentEditorPage() {
                   {block.type === "code" && (
                     <textarea
                       value={block.text}
-                      onFocus={() => sendCursor({ blockId: block.id, offset: 0 })}
+                      onFocus={() =>
+                        sendCursor({ blockId: block.id, offset: 0 })
+                      }
                       onBlur={() => sendCursor(null)}
-                      onChange={(e) => handleBlockChange(block.id, e.target.value)}
+                      onChange={(e) =>
+                        handleBlockChange(block.id, e.target.value)
+                      }
                       disabled={isReadOnly}
                       className="font-mono text-xs w-full p-3 bg-muted/60 border border-muted/50 rounded-lg text-foreground focus:outline-none focus:ring-1 focus:ring-primary h-24 resize-none leading-relaxed"
                       placeholder="// Write code here..."
@@ -878,7 +1051,8 @@ export default function DocumentEditorPage() {
                 </div>
 
                 {/* Collaborative Cursor Indicator Tags */}
-                {collaborators.filter((c) => c.cursor?.blockId === block.id).length > 0 && (
+                {collaborators.filter((c) => c.cursor?.blockId === block.id)
+                  .length > 0 && (
                   <div className="flex flex-col gap-1 items-end ml-2 self-center shrink-0">
                     {collaborators
                       .filter((c) => c.cursor?.blockId === block.id)
@@ -890,15 +1064,20 @@ export default function DocumentEditorPage() {
                           style={{
                             color: getCollaboratorColor(c.userId),
                             borderColor: getCollaboratorColor(c.userId) + "30",
-                            backgroundColor: getCollaboratorColor(c.userId) + "08",
+                            backgroundColor:
+                              getCollaboratorColor(c.userId) + "08",
                           }}
                         >
                           <span
                             className="w-1.5 h-1.5 rounded-full"
-                            style={{ backgroundColor: getCollaboratorColor(c.userId) }}
+                            style={{
+                              backgroundColor: getCollaboratorColor(c.userId),
+                            }}
                           />
                           {c.name}
-                          {c.typing && <span className="animate-pulse">✍️</span>}
+                          {c.typing && (
+                            <span className="animate-pulse">✍️</span>
+                          )}
                         </Badge>
                       ))}
                   </div>
@@ -956,13 +1135,19 @@ export default function DocumentEditorPage() {
           <aside className="w-80 border-l bg-card/65 backdrop-blur-sm p-5 flex flex-col justify-between overflow-y-auto">
             <div className="space-y-6">
               <div>
-                <h2 className="text-base font-bold text-foreground">Sharing & Access</h2>
-                <p className="text-xs text-muted-foreground mt-1">Configure who can edit or view this document.</p>
+                <h2 className="text-base font-bold text-foreground">
+                  Sharing & Access
+                </h2>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Configure who can edit or view this document.
+                </p>
               </div>
 
               {/* Visibility selection */}
               <div className="space-y-2">
-                <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Document Visibility</Label>
+                <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Document Visibility
+                </Label>
                 <div className="flex gap-2">
                   <Button
                     variant={visibility === "PRIVATE" ? "default" : "outline"}
@@ -999,8 +1184,13 @@ export default function DocumentEditorPage() {
 
               {/* Add collaborator form */}
               {!isReadOnly && (
-                <form onSubmit={handleAddCollaborator} className="space-y-3 pt-4 border-t">
-                  <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Add Collaborator</Label>
+                <form
+                  onSubmit={handleAddCollaborator}
+                  className="space-y-3 pt-4 border-t"
+                >
+                  <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Add Collaborator
+                  </Label>
                   <Input
                     type="email"
                     placeholder="collab@example.com"
@@ -1027,23 +1217,57 @@ export default function DocumentEditorPage() {
 
               {/* Collaborators List */}
               <div className="space-y-3 pt-4 border-t">
-                <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Collaborators</Label>
+                <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Collaborators
+                </Label>
                 <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
                   {invitedCollaborators.length === 0 ? (
-                    <p className="text-xs text-muted-foreground italic">No collaborators invited yet.</p>
+                    <p className="text-xs text-muted-foreground italic">
+                      No collaborators invited yet.
+                    </p>
                   ) : (
                     invitedCollaborators.map((collab) => (
-                      <div key={collab.id} className="flex items-center justify-between text-xs p-2 rounded-lg bg-muted/40 border border-muted/30">
+                      <div
+                        key={collab.id}
+                        className="flex items-center justify-between text-xs p-2 rounded-lg bg-muted/40 border border-muted/30"
+                      >
                         <div className="min-w-0">
-                          <p className="font-semibold truncate text-foreground">{collab.user.name || "Collaborator"}</p>
-                          <p className="text-[10px] text-muted-foreground truncate">{collab.user.email}</p>
+                          <p className="font-semibold truncate text-foreground">
+                            {collab.user.name || "Collaborator"}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground truncate">
+                            {collab.user.email}
+                          </p>
                         </div>
                         <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="text-[9px] py-0">{collab.role}</Badge>
+                          {!isReadOnly ? (
+                            <select
+                              value={collab.role}
+                              onChange={(e) =>
+                                handleUpdateCollaboratorRole(
+                                  collab.user.email,
+                                  e.target.value as any,
+                                )
+                              }
+                              className="text-[10px] border rounded px-1.5 py-0.5 bg-background focus:outline-none cursor-pointer"
+                            >
+                              <option value="EDITOR">Editor</option>
+                              <option value="VIEWER">Viewer</option>
+                            </select>
+                          ) : (
+                            <Badge
+                              variant="outline"
+                              className="text-[9px] py-0"
+                            >
+                              {collab.role}
+                            </Badge>
+                          )}
                           {!isReadOnly && (
                             <button
-                              onClick={() => handleRemoveCollaborator(collab.user.id)}
-                              className="text-muted-foreground hover:text-red-500"
+                              onClick={() =>
+                                handleRemoveCollaborator(collab.user.id)
+                              }
+                              className="text-muted-foreground hover:text-red-500 cursor-pointer p-0.5 rounded hover:bg-muted"
                               title="Remove"
                             >
                               <Trash className="h-3 w-3" />
@@ -1072,14 +1296,23 @@ export default function DocumentEditorPage() {
           <aside className="w-80 border-l bg-card/65 backdrop-blur-sm p-5 flex flex-col justify-between overflow-y-auto">
             <div className="space-y-6 flex-1 flex flex-col min-h-0">
               <div>
-                <h2 className="text-base font-bold text-foreground">Timeline Checklist</h2>
-                <p className="text-xs text-muted-foreground mt-1">Review older checkpoints and restore past states safely.</p>
+                <h2 className="text-base font-bold text-foreground">
+                  Timeline Checklist
+                </h2>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Review older checkpoints and restore past states safely.
+                </p>
               </div>
 
               {/* Create Snapshot Checkpoint */}
               {!isReadOnly && (
-                <form onSubmit={handleCreateSnapshot} className="space-y-2.5 border-b pb-4">
-                  <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Save Checkpoint</Label>
+                <form
+                  onSubmit={handleCreateSnapshot}
+                  className="space-y-2.5 border-b pb-4"
+                >
+                  <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Save Checkpoint
+                  </Label>
                   <div className="flex gap-2">
                     <Input
                       type="text"
@@ -1098,7 +1331,9 @@ export default function DocumentEditorPage() {
 
               {/* Timeline versions list */}
               <div className="flex-1 flex flex-col min-h-0">
-                <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2.5">Historical Checkpoints</Label>
+                <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2.5">
+                  Historical Checkpoints
+                </Label>
                 <ScrollArea className="flex-1 pr-1.5">
                   <div className="space-y-3">
                     {versions.map((ver) => (
@@ -1112,8 +1347,15 @@ export default function DocumentEditorPage() {
                         }`}
                       >
                         <div className="flex items-center justify-between font-bold mb-1 text-foreground">
-                          <span>v{ver.version}: {ver.title}</span>
-                          <Badge variant="secondary" className="text-[8px] py-0">Active</Badge>
+                          <span>
+                            v{ver.version}: {ver.title}
+                          </span>
+                          <Badge
+                            variant="secondary"
+                            className="text-[8px] py-0"
+                          >
+                            Active
+                          </Badge>
                         </div>
                         {(() => {
                           const parts = ver.summary?.split(" | Hash: ") || [];
@@ -1125,7 +1367,10 @@ export default function DocumentEditorPage() {
                                 {baseSummary}
                               </p>
                               {hash && (
-                                <p className="text-[8px] font-mono text-muted-foreground/60 select-all truncate mt-1 bg-muted/50 p-1 rounded" title={`SHA-256 Hash: ${hash}`}>
+                                <p
+                                  className="text-[8px] font-mono text-muted-foreground/60 select-all truncate mt-1 bg-muted/50 p-1 rounded"
+                                  title={`SHA-256 Hash: ${hash}`}
+                                >
                                   SHA-256: {hash}
                                 </p>
                               )}
@@ -1134,7 +1379,9 @@ export default function DocumentEditorPage() {
                         })()}
                         <div className="flex justify-between items-center text-[10px] text-muted-foreground/80 mt-2">
                           <span>By: {ver.createdBy}</span>
-                          <span>{new Date(ver.createdAt).toLocaleDateString()}</span>
+                          <span>
+                            {new Date(ver.createdAt).toLocaleDateString()}
+                          </span>
                         </div>
                       </div>
                     ))}
@@ -1145,23 +1392,39 @@ export default function DocumentEditorPage() {
 
             {/* Version Preview Modal */}
             {previewVersion && (
-              <Dialog open={!!previewVersion} onOpenChange={() => setPreviewVersion(null)}>
+              <Dialog
+                open={!!previewVersion}
+                onOpenChange={() => setPreviewVersion(null)}
+              >
                 <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-card">
                   <DialogHeader>
-                    <DialogTitle>Preview Checkpoint v{previewVersion.version}: "{previewVersion.title}"</DialogTitle>
+                    <DialogTitle>
+                      Preview Checkpoint v{previewVersion.version}: "
+                      {previewVersion.title}"
+                    </DialogTitle>
                     <DialogDescription>
-                      Created by {previewVersion.createdBy} on {new Date(previewVersion.createdAt).toLocaleString()}.
+                      Created by {previewVersion.createdBy} on{" "}
+                      {new Date(previewVersion.createdAt).toLocaleString()}.
                     </DialogDescription>
                   </DialogHeader>
 
-                   <ScrollArea className="flex-1 my-4 border p-4 rounded-lg bg-muted/20">
+                  <ScrollArea className="flex-1 my-4 border p-4 rounded-lg bg-muted/20">
                     <div className="space-y-4">
                       {(() => {
-                        const previewBlocks = (previewVersion.content as any)?.blocks || [];
-                        const currentBlockMap = new Map(blocks.map((b) => [b.id, b]));
-                        const previewBlockMap = new Map(previewBlocks.map((b: any) => [b.id, b]));
+                        const previewBlocks =
+                          (previewVersion.content as any)?.blocks || [];
+                        const currentBlockMap = new Map(
+                          blocks.map((b) => [b.id, b]),
+                        );
+                        const previewBlockMap = new Map(
+                          previewBlocks.map((b: any) => [b.id, b]),
+                        );
 
-                        const combined: Array<{ block: any; status: "same" | "modified" | "deleted" | "added"; currentBlock?: any }> = [];
+                        const combined: Array<{
+                          block: any;
+                          status: "same" | "modified" | "deleted" | "added";
+                          currentBlock?: any;
+                        }> = [];
 
                         // 1. Add all blocks from preview, marking if same, modified, or deleted in current document
                         previewBlocks.forEach((pb: any) => {
@@ -1169,8 +1432,15 @@ export default function DocumentEditorPage() {
                           if (!cb) {
                             combined.push({ block: pb, status: "deleted" });
                           } else {
-                            const isDiff = pb.text !== cb.text || pb.type !== cb.type || pb.checked !== cb.checked;
-                            combined.push({ block: pb, status: isDiff ? "modified" : "same", currentBlock: cb });
+                            const isDiff =
+                              pb.text !== cb.text ||
+                              pb.type !== cb.type ||
+                              pb.checked !== cb.checked;
+                            combined.push({
+                              block: pb,
+                              status: isDiff ? "modified" : "same",
+                              currentBlock: cb,
+                            });
                           }
                         });
 
@@ -1181,63 +1451,97 @@ export default function DocumentEditorPage() {
                           }
                         });
 
-                        return combined.map(({ block: b, status, currentBlock }) => {
-                          const bgClass =
-                            status === "added"
-                              ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-700"
-                              : status === "deleted"
-                              ? "bg-red-500/10 border-red-500/20 text-red-600 line-through"
-                              : status === "modified"
-                              ? "bg-amber-500/10 border-amber-500/20 text-amber-800"
-                              : "border-transparent text-foreground";
+                        return combined.map(
+                          ({ block: b, status, currentBlock }) => {
+                            const bgClass =
+                              status === "added"
+                                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-700"
+                                : status === "deleted"
+                                  ? "bg-red-500/10 border-red-500/20 text-red-600 line-through"
+                                  : status === "modified"
+                                    ? "bg-amber-500/10 border-amber-500/20 text-amber-800"
+                                    : "border-transparent text-foreground";
 
-                          const statusLabel =
-                            status === "added"
-                              ? " [Added in active]"
-                              : status === "deleted"
-                              ? " [Deleted in active]"
-                              : status === "modified"
-                              ? " [Modified]"
-                              : "";
+                            const statusLabel =
+                              status === "added"
+                                ? " [Added in active]"
+                                : status === "deleted"
+                                  ? " [Deleted in active]"
+                                  : status === "modified"
+                                    ? " [Modified]"
+                                    : "";
 
-                          return (
-                            <div key={b.id} className={`p-3 border rounded-lg transition-all ${bgClass}`}>
-                              <div className="flex items-center justify-between gap-2 mb-1.5 border-b border-muted-foreground/10 pb-1">
-                                <span className="text-[9px] uppercase font-bold tracking-wider text-muted-foreground/80">
-                                  {b.type} {statusLabel}
-                                </span>
-                              </div>
-
-                              {b.type.startsWith("heading") ? (
-                                <p className="font-bold text-base">{b.text}</p>
-                              ) : b.type === "todo" ? (
-                                <div className="flex items-center gap-2 text-sm">
-                                  <input type="checkbox" checked={b.checked || false} readOnly disabled />
-                                  <span className={b.checked ? "line-through opacity-70" : ""}>{b.text}</span>
+                            return (
+                              <div
+                                key={b.id}
+                                className={`p-3 border rounded-lg transition-all ${bgClass}`}
+                              >
+                                <div className="flex items-center justify-between gap-2 mb-1.5 border-b border-muted-foreground/10 pb-1">
+                                  <span className="text-[9px] uppercase font-bold tracking-wider text-muted-foreground/80">
+                                    {b.type} {statusLabel}
+                                  </span>
                                 </div>
-                              ) : b.type === "code" ? (
-                                <pre className="font-mono text-xs p-2 bg-background/60 border rounded leading-relaxed overflow-x-auto">{b.text}</pre>
-                              ) : (
-                                <p className="text-sm leading-relaxed">{b.text}</p>
-                              )}
 
-                              {status === "modified" && currentBlock && (
-                                <div className="mt-2.5 pt-2 border-t border-amber-500/20 text-xs text-muted-foreground space-y-1">
-                                  <p className="font-semibold uppercase tracking-wider text-[8px] text-amber-700">Active Current Value:</p>
-                                  <p className="text-foreground italic">
-                                    {currentBlock.text || <span className="text-muted-foreground font-light">Empty content</span>}
+                                {b.type.startsWith("heading") ? (
+                                  <p className="font-bold text-base">
+                                    {b.text}
                                   </p>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        });
+                                ) : b.type === "todo" ? (
+                                  <div className="flex items-center gap-2 text-sm">
+                                    <input
+                                      type="checkbox"
+                                      checked={b.checked || false}
+                                      readOnly
+                                      disabled
+                                    />
+                                    <span
+                                      className={
+                                        b.checked
+                                          ? "line-through opacity-70"
+                                          : ""
+                                      }
+                                    >
+                                      {b.text}
+                                    </span>
+                                  </div>
+                                ) : b.type === "code" ? (
+                                  <pre className="font-mono text-xs p-2 bg-background/60 border rounded leading-relaxed overflow-x-auto">
+                                    {b.text}
+                                  </pre>
+                                ) : (
+                                  <p className="text-sm leading-relaxed">
+                                    {b.text}
+                                  </p>
+                                )}
+
+                                {status === "modified" && currentBlock && (
+                                  <div className="mt-2.5 pt-2 border-t border-amber-500/20 text-xs text-muted-foreground space-y-1">
+                                    <p className="font-semibold uppercase tracking-wider text-[8px] text-amber-700">
+                                      Active Current Value:
+                                    </p>
+                                    <p className="text-foreground italic">
+                                      {currentBlock.text || (
+                                        <span className="text-muted-foreground font-light">
+                                          Empty content
+                                        </span>
+                                      )}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          },
+                        );
                       })()}
                     </div>
                   </ScrollArea>
 
                   <DialogFooter>
-                    <Button variant="outline" onClick={() => setPreviewVersion(null)} className="h-9 text-xs">
+                    <Button
+                      variant="outline"
+                      onClick={() => setPreviewVersion(null)}
+                      className="h-9 text-xs"
+                    >
                       Close Preview
                     </Button>
                     {!isReadOnly && (
@@ -1270,26 +1574,43 @@ export default function DocumentEditorPage() {
           <aside className="w-80 border-l bg-card/65 backdrop-blur-sm p-5 flex flex-col justify-between overflow-y-auto">
             <div className="space-y-6 flex-1 flex flex-col min-h-0">
               <div>
-                <h2 className="text-base font-bold text-foreground">AI Assistant</h2>
-                <p className="text-xs text-muted-foreground mt-1">Accelerate writing, tone shifting, and content summaries.</p>
+                <h2 className="text-base font-bold text-foreground">
+                  AI Assistant
+                </h2>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Accelerate writing, tone shifting, and content summaries.
+                </p>
               </div>
 
               {/* Tabs for AI features */}
-              <Tabs defaultValue="actions" className="flex-1 flex flex-col min-h-0">
+              <Tabs
+                defaultValue="actions"
+                className="flex-1 flex flex-col min-h-0"
+              >
                 <TabsList className="grid grid-cols-2 h-9">
-                  <TabsTrigger value="actions" className="text-xs">Quick Tools</TabsTrigger>
-                  <TabsTrigger value="chat" className="text-xs">Doc Chat</TabsTrigger>
+                  <TabsTrigger value="actions" className="text-xs">
+                    Quick Tools
+                  </TabsTrigger>
+                  <TabsTrigger value="chat" className="text-xs">
+                    Doc Chat
+                  </TabsTrigger>
                 </TabsList>
 
                 {/* Quick Tools */}
-                <TabsContent value="actions" className="space-y-4 pt-4 flex-1 overflow-y-auto">
+                <TabsContent
+                  value="actions"
+                  className="space-y-4 pt-4 flex-1 overflow-y-auto"
+                >
                   {/* Summary trigger */}
                   <div className="p-3 border rounded-lg bg-muted/20 border-muted/50 space-y-2">
                     <p className="text-xs font-bold text-foreground flex items-center gap-1.5">
                       <FileText className="h-3.5 w-3.5 text-primary" />
                       Document Summary
                     </p>
-                    <p className="text-[11px] text-muted-foreground">Generates a concise markdown bullet list summary directly into the description.</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Generates a concise markdown bullet list summary directly
+                      into the description.
+                    </p>
                     <Button
                       onClick={handleAISummarize}
                       size="sm"
@@ -1308,10 +1629,15 @@ export default function DocumentEditorPage() {
                         <Sparkles className="h-3.5 w-3.5 text-primary" />
                         Tone Rewriter
                       </p>
-                      <p className="text-[11px] text-muted-foreground">Shift active blocks text to professional, witty, simple, or marketing-friendly copy.</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        Shift active blocks text to professional, witty, simple,
+                        or marketing-friendly copy.
+                      </p>
 
                       <div className="space-y-1.5">
-                        <Label className="text-[10px] uppercase font-bold text-muted-foreground/80">Select Target Tone</Label>
+                        <Label className="text-[10px] uppercase font-bold text-muted-foreground/80">
+                          Select Target Tone
+                        </Label>
                         <select
                           value={aiTone}
                           onChange={(e) => setAiTone(e.target.value)}
@@ -1320,23 +1646,31 @@ export default function DocumentEditorPage() {
                           <option value="professional">Professional</option>
                           <option value="casual and friendly">Casual</option>
                           <option value="witty and engaging">Witty</option>
-                          <option value="simple and clear (elaboration)">Simple</option>
-                          <option value="persuasive marketing">Marketing</option>
+                          <option value="simple and clear (elaboration)">
+                            Simple
+                          </option>
+                          <option value="persuasive marketing">
+                            Marketing
+                          </option>
                         </select>
                       </div>
 
                       <div className="space-y-1.5 pt-2">
-                        <Label className="text-[10px] uppercase font-bold text-muted-foreground/80">Choose Block to Apply</Label>
+                        <Label className="text-[10px] uppercase font-bold text-muted-foreground/80">
+                          Choose Block to Apply
+                        </Label>
                         <div className="space-y-1 max-h-[140px] overflow-y-auto pr-1">
-                          {blocks.filter((b) => b.text).map((b) => (
-                            <button
-                              key={b.id}
-                              onClick={() => handleAIToneShift(b.id, aiTone)}
-                              className="w-full text-left truncate p-1.5 border rounded hover:bg-muted text-[10px] text-muted-foreground"
-                            >
-                              "{b.text}"
-                            </button>
-                          ))}
+                          {blocks
+                            .filter((b) => b.text)
+                            .map((b) => (
+                              <button
+                                key={b.id}
+                                onClick={() => handleAIToneShift(b.id, aiTone)}
+                                className="w-full text-left truncate p-1.5 border rounded hover:bg-muted text-[10px] text-muted-foreground"
+                              >
+                                "{b.text}"
+                              </button>
+                            ))}
                         </div>
                       </div>
                     </div>
@@ -1344,16 +1678,23 @@ export default function DocumentEditorPage() {
                 </TabsContent>
 
                 {/* Doc Chat */}
-                <TabsContent value="chat" className="pt-4 flex-1 flex flex-col min-h-0 space-y-3 justify-between">
+                <TabsContent
+                  value="chat"
+                  className="pt-4 flex-1 flex flex-col min-h-0 space-y-3 justify-between"
+                >
                   <ScrollArea className="flex-1 bg-muted/30 border rounded-lg p-3 max-h-[300px]">
                     <div className="space-y-3.5">
                       {aiChatHistory.length === 0 ? (
                         <p className="text-xs text-muted-foreground italic text-center py-6">
-                          Ask questions about your document context. e.g. "What is the key theme of my writing?"
+                          Ask questions about your document context. e.g. "What
+                          is the key theme of my writing?"
                         </p>
                       ) : (
                         aiChatHistory.map((msg, idx) => (
-                          <div key={idx} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
+                          <div
+                            key={idx}
+                            className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}
+                          >
                             <span className="text-[9px] uppercase font-bold text-muted-foreground tracking-wider mb-0.5">
                               {msg.sender === "user" ? "You" : "Assistant"}
                             </span>
@@ -1388,7 +1729,12 @@ export default function DocumentEditorPage() {
                       onChange={(e) => setAiChatQuery(e.target.value)}
                       className="h-8 text-xs bg-background/50 flex-1"
                     />
-                    <Button type="submit" size="sm" className="h-8 px-3 cursor-pointer" disabled={aiLoading || !aiChatQuery}>
+                    <Button
+                      type="submit"
+                      size="sm"
+                      className="h-8 px-3 cursor-pointer"
+                      disabled={aiLoading || !aiChatQuery}
+                    >
                       <Send className="h-3.5 w-3.5" />
                     </Button>
                   </form>
@@ -1427,7 +1773,14 @@ export default function DocumentEditorPage() {
 }
 
 function getCollaboratorColor(userId: string) {
-  const colors = ["#3b82f6", "#10b981", "#6366f1", "#8b5cf6", "#ec4899", "#f97316"];
+  const colors = [
+    "#3b82f6",
+    "#10b981",
+    "#6366f1",
+    "#8b5cf6",
+    "#ec4899",
+    "#f97316",
+  ];
   let hash = 0;
   for (let i = 0; i < userId.length; i++) {
     hash = userId.charCodeAt(i) + ((hash << 5) - hash);

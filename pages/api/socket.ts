@@ -25,7 +25,9 @@ export const config = {
 };
 
 // Heuristic cookie parser
-function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+function parseCookies(
+  cookieHeader: string | undefined,
+): Record<string, string> {
   const list: Record<string, string> = {};
   if (!cookieHeader) return list;
   cookieHeader.split(";").forEach((cookie) => {
@@ -46,7 +48,7 @@ const saveTimeouts = new Map<string, NodeJS.Timeout>();
 
 export default function handler(
   req: NextApiRequest,
-  res: NextApiResponseWithSocket
+  res: NextApiResponseWithSocket,
 ) {
   if (res.socket.server.io) {
     res.end();
@@ -63,6 +65,22 @@ export default function handler(
   });
 
   res.socket.server.io = io;
+
+  // Prepend the upgrade listener of Socket.IO so it intercepts upgrade requests before Next.js HMR
+  const upgradeListeners = res.socket.server.listeners("upgrade");
+  const lastUpgradeListener = upgradeListeners[upgradeListeners.length - 1];
+  if (lastUpgradeListener) {
+    res.socket.server.removeListener("upgrade", lastUpgradeListener as any);
+    res.socket.server.prependListener("upgrade", lastUpgradeListener as any);
+  }
+
+  // Prepend the request listener of Socket.IO so it handles polling requests before Next.js routing
+  const requestListeners = res.socket.server.listeners("request");
+  const lastRequestListener = requestListeners[requestListeners.length - 1];
+  if (lastRequestListener) {
+    res.socket.server.removeListener("request", lastRequestListener as any);
+    res.socket.server.prependListener("request", lastRequestListener as any);
+  }
 
   // Socket middleware for Authentication
   io.use((socket: Socket, next) => {
@@ -204,69 +222,127 @@ export default function handler(
     });
 
     // Handle updates
-    socket.on("document:update", async ({ documentId, payload, force }) => {
-      const roomName = `doc:${documentId}`;
-      const roomMembers = roomsPresence.get(roomName);
-      if (!roomMembers || !roomMembers.has(socket.id)) return;
+    socket.on(
+      "document:update",
+      async (
+        {
+          documentId,
+          payload,
+          force,
+        }: { documentId: string; payload: any; force: boolean },
+        callback?: (ack: { ok: boolean; error?: string }) => void,
+      ) => {
+        const roomName = `doc:${documentId}`;
+        const roomMembers = roomsPresence.get(roomName);
+        if (!roomMembers || !roomMembers.has(socket.id)) {
+          callback?.({ ok: false, error: "Not joined to this document room" });
+          return;
+        }
 
-      const member = roomMembers.get(socket.id);
-      if (member.role === "VIEWER") {
-        socket.emit("document:error", "Viewers cannot push document edits");
-        return;
-      }
+        const member = roomMembers.get(socket.id);
+        if (member.role === "VIEWER") {
+          socket.emit("document:error", "Viewers cannot push document edits");
+          callback?.({ ok: false, error: "Viewers cannot push edits" });
+          return;
+        }
 
-      try {
-        const serverDoc = await prisma.document.findUnique({
-          where: { id: documentId },
-        });
+        try {
+          const serverDoc = await prisma.document.findUnique({
+            where: { id: documentId },
+          });
 
-        if (!serverDoc) return;
+          if (!serverDoc) {
+            callback?.({ ok: false, error: "Document not found" });
+            return;
+          }
 
-        // Conflict check: only check if there are other concurrent collaborators in the room
-        if (serverDoc.currentVersion > payload.version && !force) {
-          const activeCollaboratorsCount = roomMembers.size;
-          
-          if (activeCollaboratorsCount > 1) {
-            const baseVersion = await prisma.documentVersion.findFirst({
-              where: {
-                documentId,
-                version: payload.version,
-              },
-            });
+          // Conflict check: only check if there are other concurrent collaborators in the room
+          if (serverDoc.currentVersion > payload.version && !force) {
+            const activeCollaboratorsCount = roomMembers.size;
 
-            if (baseVersion) {
-              const baseBlocks = (baseVersion.content as any)?.blocks || [];
-              const clientBlocks = payload.content?.blocks || [];
-              const serverBlocks = (serverDoc.content as any)?.blocks || [];
+            if (activeCollaboratorsCount > 1) {
+              const baseVersion = await prisma.documentVersion.findFirst({
+                where: {
+                  documentId,
+                  version: payload.version,
+                },
+              });
 
-              if (hasOverlappingConflict(baseBlocks, clientBlocks, serverBlocks)) {
-                // Compile conflicting blocks details
-                const conflictingBlocks = baseBlocks.filter((baseB: any) => {
-                  const clientB = clientBlocks.find((cb: any) => cb.id === baseB.id);
-                  const serverB = serverBlocks.find((sb: any) => sb.id === baseB.id);
-                  if (clientB && serverB) {
-                    const clientChanged = JSON.stringify(clientB) !== JSON.stringify(baseB);
-                    const serverChanged = JSON.stringify(serverB) !== JSON.stringify(baseB);
-                    const contentIdentical =
-                      clientB.text === serverB.text &&
-                      clientB.type === serverB.type &&
-                      clientB.checked === serverB.checked;
-                    return clientChanged && serverChanged && !contentIdentical;
-                  }
-                  return false;
-                });
+              if (baseVersion) {
+                const baseBlocks = (baseVersion.content as any)?.blocks || [];
+                const clientBlocks = payload.content?.blocks || [];
+                const serverBlocks = (serverDoc.content as any)?.blocks || [];
 
-                const modifiedBlocks = conflictingBlocks.map((baseB: any) => {
-                  const clientB = clientBlocks.find((cb: any) => cb.id === baseB.id);
-                  const serverB = serverBlocks.find((sb: any) => sb.id === baseB.id);
-                  return {
-                    blockId: baseB.id,
-                    type: baseB.type,
-                    localContent: clientB?.text || "",
-                    remoteContent: serverB?.text || "",
+                if (
+                  hasOverlappingConflict(baseBlocks, clientBlocks, serverBlocks)
+                ) {
+                  // Compile conflicting blocks details
+                  const conflictingBlocks = baseBlocks.filter((baseB: any) => {
+                    const clientB = clientBlocks.find(
+                      (cb: any) => cb.id === baseB.id,
+                    );
+                    const serverB = serverBlocks.find(
+                      (sb: any) => sb.id === baseB.id,
+                    );
+                    if (clientB && serverB) {
+                      const clientChanged =
+                        JSON.stringify(clientB) !== JSON.stringify(baseB);
+                      const serverChanged =
+                        JSON.stringify(serverB) !== JSON.stringify(baseB);
+                      const contentIdentical =
+                        clientB.text === serverB.text &&
+                        clientB.type === serverB.type &&
+                        clientB.checked === serverB.checked;
+                      return (
+                        clientChanged && serverChanged && !contentIdentical
+                      );
+                    }
+                    return false;
+                  });
+
+                  const modifiedBlocks = conflictingBlocks.map((baseB: any) => {
+                    const clientB = clientBlocks.find(
+                      (cb: any) => cb.id === baseB.id,
+                    );
+                    const serverB = serverBlocks.find(
+                      (sb: any) => sb.id === baseB.id,
+                    );
+                    return {
+                      blockId: baseB.id,
+                      type: baseB.type,
+                      localContent: clientB?.text || "",
+                      remoteContent: serverB?.text || "",
+                    };
+                  });
+
+                  socket.emit("conflict:detected", {
+                    hasConflict: true,
+                    documentId,
+                    conflictingUser: {
+                      name: serverDoc.lastEditedBy || "Another Collaborator",
+                      updatedAt: serverDoc.updatedAt,
+                    },
+                    localVersion: payload.version,
+                    serverVersion: serverDoc.currentVersion,
+                    modifiedBlocks,
+                    serverTitle: serverDoc.title,
+                    serverContent: serverDoc.content,
+                    serverUpdatedAt: serverDoc.updatedAt,
+                  });
+                  callback?.({ ok: false, error: "Conflict detected" });
+                  return;
+                } else {
+                  const mergedBlocks = serverThreeWayMerge(
+                    baseBlocks,
+                    clientBlocks,
+                    serverBlocks,
+                  );
+                  payload.content = {
+                    ...payload.content,
+                    blocks: mergedBlocks,
                   };
-                });
-
+                }
+              } else {
                 socket.emit("conflict:detected", {
                   hasConflict: true,
                   documentId,
@@ -276,160 +352,163 @@ export default function handler(
                   },
                   localVersion: payload.version,
                   serverVersion: serverDoc.currentVersion,
-                  modifiedBlocks,
+                  modifiedBlocks: [],
                   serverTitle: serverDoc.title,
                   serverContent: serverDoc.content,
                   serverUpdatedAt: serverDoc.updatedAt,
                 });
+                callback?.({
+                  ok: false,
+                  error: "Conflict detected (base version missing)",
+                });
                 return;
-              } else {
-                const mergedBlocks = serverThreeWayMerge(baseBlocks, clientBlocks, serverBlocks);
-                payload.content = {
-                  ...payload.content,
-                  blocks: mergedBlocks,
-                };
               }
-            } else {
-              socket.emit("conflict:detected", {
-                hasConflict: true,
-                documentId,
-                conflictingUser: {
-                  name: serverDoc.lastEditedBy || "Another Collaborator",
-                  updatedAt: serverDoc.updatedAt,
-                },
-                localVersion: payload.version,
-                serverVersion: serverDoc.currentVersion,
-                modifiedBlocks: [],
-                serverTitle: serverDoc.title,
-                serverContent: serverDoc.content,
-                serverUpdatedAt: serverDoc.updatedAt,
-              });
-              return;
             }
           }
-        }
 
-        // Broadcast the update immediately to other collaborators for real-time responsiveness
-        socket.to(roomName).emit("document:updated", {
-          userId: user.id,
-          userName: member.name,
-          version: payload.version, // optimistic/client version
-          content: payload.content,
-          title: payload.title,
-          description: payload.description,
-        });
+          // Broadcast the update immediately to other collaborators for real-time responsiveness
+          socket.to(roomName).emit("document:updated", {
+            userId: user.id,
+            userName: member.name,
+            version: payload.version, // optimistic/client version
+            content: payload.content,
+            title: payload.title,
+            description: payload.description,
+          });
 
-        // Schedule database persistence (Debounced writes)
-        if (saveTimeouts.has(documentId)) {
-          clearTimeout(saveTimeouts.get(documentId));
-        }
+          // ✅ Acknowledge receipt/broadcast now. Actual DB persistence is
+          // still confirmed later, separately, via "document:persisted".
+          callback?.({ ok: true });
 
-        const nextVersion = force ? serverDoc.currentVersion + 1 : payload.version + 1;
+          // Schedule database persistence (Debounced writes)
+          if (saveTimeouts.has(documentId)) {
+            clearTimeout(saveTimeouts.get(documentId));
+          }
 
-        const timeout = setTimeout(async () => {
-          try {
-            saveTimeouts.delete(documentId);
+          const nextVersion = force
+            ? serverDoc.currentVersion + 1
+            : payload.version + 1;
 
-            // Compute counts
-            const blocks = payload.content?.blocks || [];
-            const wordCount = blocks.reduce(
-              (acc: number, b: any) =>
-                acc + (b.text ? b.text.trim().split(/\s+/).filter(Boolean).length : 0),
-              0
-            );
-            const characterCount = blocks.reduce(
-              (acc: number, b: any) => acc + (b.text ? b.text.length : 0),
-              0
-            );
+          const timeout = setTimeout(async () => {
+            try {
+              saveTimeouts.delete(documentId);
 
-            // Update database state
-            const updated = await prisma.document.update({
-              where: { id: documentId },
-              data: {
-                title: payload.title,
-                description: payload.description || "",
-                content: payload.content,
-                currentVersion: nextVersion,
-                wordCount,
-                characterCount,
-                lastEditedBy: member.name,
-                lastEditedAt: new Date(),
-              },
-            });
+              // Compute counts
+              const blocks = payload.content?.blocks || [];
+              const wordCount = blocks.reduce(
+                (acc: number, b: any) =>
+                  acc +
+                  (b.text
+                    ? b.text.trim().split(/\s+/).filter(Boolean).length
+                    : 0),
+                0,
+              );
+              const characterCount = blocks.reduce(
+                (acc: number, b: any) => acc + (b.text ? b.text.length : 0),
+                0,
+              );
 
-            // Log conflict resolution audit record if forced resolve was chosen
-            if (force) {
-              await prisma.activity.create({
+              // Update database state
+              const updated = await prisma.document.update({
+                where: { id: documentId },
+                data: {
+                  title: payload.title,
+                  description: payload.description || "",
+                  content: payload.content,
+                  currentVersion: nextVersion,
+                  wordCount,
+                  characterCount,
+                  lastEditedBy: member.name,
+                  lastEditedAt: new Date(),
+                },
+              });
+
+              // Log conflict resolution audit record if forced resolve was chosen
+              if (force) {
+                await prisma.activity.create({
+                  data: {
+                    documentId,
+                    userId: user.id,
+                    action: "UPDATED",
+                    metadata: {
+                      conflictResolved: true,
+                      resolution: payload.resolutionChoice || "merge",
+                      localVersion: payload.version,
+                      serverVersion: serverDoc.currentVersion,
+                      resolvedAt: new Date().toISOString(),
+                    },
+                  },
+                });
+              }
+
+              // Write version history checkpoint with cryptographic SHA-256 hash of blocks content
+              const contentHash = crypto
+                .createHash("sha256")
+                .update(JSON.stringify(payload.content || { blocks: [] }))
+                .digest("hex");
+              const baseSummary = force
+                ? `Forced overwrite / merged conflict (v${nextVersion})`
+                : `Collaborative update (v${nextVersion})`;
+              await prisma.documentVersion.create({
                 data: {
                   documentId,
-                  userId: user.id,
-                  action: "UPDATED",
-                  metadata: {
-                    conflictResolved: true,
-                    resolution: payload.resolutionChoice || "merge",
-                    localVersion: payload.version,
-                    serverVersion: serverDoc.currentVersion,
-                    resolvedAt: new Date().toISOString(),
-                  },
+                  version: nextVersion,
+                  title: payload.title,
+                  content: payload.content,
+                  createdBy: member.name,
+                  summary: `${baseSummary} | Hash: ${contentHash}`,
                 },
               });
-            }
 
-            // Write version history checkpoint with cryptographic SHA-256 hash of blocks content
-            const contentHash = crypto
-              .createHash("sha256")
-              .update(JSON.stringify(payload.content || { blocks: [] }))
-              .digest("hex");
-            const baseSummary = force ? `Forced overwrite / merged conflict (v${nextVersion})` : `Collaborative update (v${nextVersion})`;
-            await prisma.documentVersion.create({
-              data: {
-                documentId,
+              // Broadcast persistent database sync success
+              io.to(roomName).emit("document:persisted", {
                 version: nextVersion,
-                title: payload.title,
-                content: payload.content,
-                createdBy: member.name,
-                summary: `${baseSummary} | Hash: ${contentHash}`,
-              },
-            });
+                updatedAt: updated.updatedAt,
+                lastEditedBy: updated.lastEditedBy,
+              });
+            } catch (dbErr) {
+              console.error(
+                "Database save failed inside socket handler:",
+                dbErr,
+              );
+              socket.emit(
+                "document:error",
+                "Failed to persist document changes",
+              );
+            }
+          }, 2000); // 2 seconds debouncer
 
-            // Broadcast persistent database sync success
-            io.to(roomName).emit("document:persisted", {
-              version: nextVersion,
-              updatedAt: updated.updatedAt,
-              lastEditedBy: updated.lastEditedBy,
-            });
-          } catch (dbErr) {
-            console.error("Database save failed inside socket handler:", dbErr);
-            socket.emit("document:error", "Failed to persist document changes");
-          }
-        }, 2000); // 2 seconds debouncer
-
-        saveTimeouts.set(documentId, timeout);
-      } catch (err) {
-        console.error("Update message handler error:", err);
-      }
-    });
+          saveTimeouts.set(documentId, timeout);
+        } catch (err) {
+          console.error("Update message handler error:", err);
+          callback?.({ ok: false, error: "Internal server error" });
+        }
+      },
+    );
 
     // Handle conflict resolution tracking logs
-    socket.on("conflict:resolved", async ({ documentId, resolutionChoice, localVersion }) => {
-      try {
-        await prisma.activity.create({
-          data: {
-            documentId,
-            userId: user.id,
-            action: "UPDATED",
-            metadata: {
-              conflictResolved: true,
-              resolution: resolutionChoice,
-              localVersion,
-              resolvedAt: new Date().toISOString(),
+    socket.on(
+      "conflict:resolved",
+      async ({ documentId, resolutionChoice, localVersion }) => {
+        try {
+          await prisma.activity.create({
+            data: {
+              documentId,
+              userId: user.id,
+              action: "UPDATED",
+              metadata: {
+                conflictResolved: true,
+                resolution: resolutionChoice,
+                localVersion,
+                resolvedAt: new Date().toISOString(),
+              },
             },
-          },
-        });
-      } catch (err) {
-        console.error("Conflict resolved log error:", err);
-      }
-    });
+          });
+        } catch (err) {
+          console.error("Conflict resolved log error:", err);
+        }
+      },
+    );
 
     // Handle cursor position & selections
     socket.on("document:cursor", ({ documentId, cursor }) => {
@@ -470,12 +549,15 @@ export default function handler(
       roomsPresence.forEach((roomMembers, roomName) => {
         if (roomMembers.has(socket.id)) {
           roomMembers.delete(socket.id);
-          
+
           if (roomMembers.size === 0) {
             roomsPresence.delete(roomName);
           } else {
             // Broadcast remaining members list
-            io.to(roomName).emit("presence:update", Array.from(roomMembers.values()));
+            io.to(roomName).emit(
+              "presence:update",
+              Array.from(roomMembers.values()),
+            );
           }
         }
       });
@@ -485,7 +567,11 @@ export default function handler(
   res.end();
 }
 
-function hasOverlappingConflict(baseBlocks: any[], clientBlocks: any[], serverBlocks: any[]): boolean {
+function hasOverlappingConflict(
+  baseBlocks: any[],
+  clientBlocks: any[],
+  serverBlocks: any[],
+): boolean {
   const baseMap = new Map((baseBlocks || []).map((b) => [b.id, b]));
   const serverMap = new Map((serverBlocks || []).map((b) => [b.id, b]));
   const clientMap = new Map((clientBlocks || []).map((b) => [b.id, b]));
@@ -519,7 +605,11 @@ function hasOverlappingConflict(baseBlocks: any[], clientBlocks: any[], serverBl
   return false;
 }
 
-function serverThreeWayMerge(baseBlocks: any[], clientBlocks: any[], serverBlocks: any[]): any[] {
+function serverThreeWayMerge(
+  baseBlocks: any[],
+  clientBlocks: any[],
+  serverBlocks: any[],
+): any[] {
   const baseMap = new Map((baseBlocks || []).map((b) => [b.id, b]));
   const serverMap = new Map((serverBlocks || []).map((b) => [b.id, b]));
   const clientMap = new Map((clientBlocks || []).map((b) => [b.id, b]));
@@ -560,7 +650,10 @@ function serverThreeWayMerge(baseBlocks: any[], clientBlocks: any[], serverBlock
       } else if (serverB && !clientB) {
         resolvedMap.set(id, serverB);
       } else if (clientB && serverB) {
-        resolvedMap.set(id, clientB.updatedAt >= serverB.updatedAt ? clientB : serverB);
+        resolvedMap.set(
+          id,
+          clientB.updatedAt >= serverB.updatedAt ? clientB : serverB,
+        );
       }
     } else {
       if (serverB && !clientB) {

@@ -66,8 +66,8 @@ export function ConflictDialog({
   const initials = collaboratorName.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase() || "AC";
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-2xl bg-card shadow-2xl border-destructive/20 max-h-[90vh] flex flex-col">
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()} >
+      <DialogContent className="min-w-3xl bg-card shadow-2xl border-destructive/20 max-h-[90vh] flex flex-col">
         <DialogHeader className="space-y-3">
           <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-destructive/10 text-destructive">
             <AlertTriangle className="h-5.5 w-5.5 animate-pulse" />

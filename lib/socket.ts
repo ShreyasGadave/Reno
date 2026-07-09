@@ -8,8 +8,11 @@ export function getSocket(): Socket {
   }
 
   if (!socketInstance) {
+    console.log("🔌 [Socket Manager] Initializing singleton Socket.IO instance with addTrailingSlash: false & transports: ['websocket']");
     socketInstance = io(window.location.origin, {
       path: "/api/socket",
+      addTrailingSlash: false,
+      transports: ["polling", "websocket"],
       autoConnect: false,
       reconnection: true,
       reconnectionAttempts: 10,
